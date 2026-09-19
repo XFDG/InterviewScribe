@@ -1,6 +1,6 @@
 # Third-party notices
 
-InterviewScribe 通过独立进程使用 FFmpeg，并随安装包分发 transcribe.cpp 的 Windows 原生运行库。MOSS 模型不在安装包中，由用户首次使用时下载。精确版本、下载地址、文件大小和 SHA-256 见 `packaging/dependencies.lock.json`。
+InterviewScribe 通过独立进程使用 FFmpeg，并随安装包分发 transcribe.cpp 的 Windows 原生运行库。MOSS 模型不在安装包中，由高精度组件安装器预取，或在首次使用快速模式时下载。精确版本、下载地址、文件大小和 SHA-256 见 `packaging/dependencies.lock.json`。
 
 ## FFmpeg 9.0.2
 
@@ -28,7 +28,21 @@ FFmpeg 与 InterviewScribe 分开运行，未对 FFmpeg 二进制文件做修改
 - 模型卡：<https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/tree/bfa3d24438711391d8713c6ab0efd6264527757c>
 - 上游模型：<https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize>
 
-模型权重不随本软件安装包分发。应用下载后必须核对锁定的文件大小与 SHA-256，失败时不得加载。Apache License 2.0 全文：<https://www.apache.org/licenses/LICENSE-2.0>。
+模型权重不随本软件安装包分发。高精度组件安装器会预先下载；未安装高精度组件时，应用会在首次使用快速模式时下载。下载后必须核对锁定的文件大小与 SHA-256，失败时不得加载。Apache License 2.0 全文：<https://www.apache.org/licenses/LICENSE-2.0>。
+
+## Qwen3-ASR 高精度组件（可选）
+
+- 项目：QwenLM/Qwen3-ASR
+- 代码许可证：Apache-2.0
+- 源码：<https://github.com/QwenLM/Qwen3-ASR>
+- ASR 模型：`Qwen/Qwen3-ASR-1.7B-hf`
+- ASR 锁定 revision：`bcd2b5b7f32b480ab5790554cfa8347f246a14f3`
+- 对齐模型：`Qwen/Qwen3-ForcedAligner-0.6B-hf`
+- 对齐锁定 revision：`c07281df297b9905d24a508279258cccf987a064`
+- 模型许可证：Apache-2.0
+- 模型卡：<https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf> 和 <https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf>
+
+Qwen 模型权重、Python 运行环境及其包不随 InterviewScribe 安装包分发。只有用户主动运行本地高精度组件安装流程时，才会从各上游来源下载到用户的本地数据目录。安装的 Python 包适用其各自随包发布的许可条款。
 
 ## Microsoft .NET
 

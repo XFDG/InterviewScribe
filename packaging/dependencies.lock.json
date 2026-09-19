@@ -64,8 +64,22 @@
       "fileSizeBytes": 986899616,
       "sha256": "64ec654dc6ffcfdfe180422dffce1d33422b0c30959b7edfd131bad77ee35039",
       "license": "Apache-2.0",
-      "delivery": "first-run-download",
+      "delivery": "installer-prefetch-or-first-run-download",
       "modelCardUrl": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/tree/bfa3d24438711391d8713c6ab0efd6264527757c"
+    },
+    "qwen3Asr17bHf": {
+      "repository": "Qwen/Qwen3-ASR-1.7B-hf",
+      "revision": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
+      "license": "Apache-2.0",
+      "delivery": "optional-installer-script-download",
+      "modelCardUrl": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf/tree/bcd2b5b7f32b480ab5790554cfa8347f246a14f3"
+    },
+    "qwen3ForcedAligner06bHf": {
+      "repository": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
+      "revision": "c07281df297b9905d24a508279258cccf987a064",
+      "license": "Apache-2.0",
+      "delivery": "optional-installer-script-download",
+      "modelCardUrl": "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf/tree/c07281df297b9905d24a508279258cccf987a064"
     }
   }
 }

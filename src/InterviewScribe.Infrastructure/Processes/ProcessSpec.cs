@@ -9,6 +9,8 @@ public sealed record ProcessSpec
     public string? WorkingDirectory { get; init; }
     public string? StandardOutputLogPath { get; init; }
     public string? StandardErrorLogPath { get; init; }
+    public IReadOnlyDictionary<string, string?> EnvironmentVariables { get; init; }
+        = new Dictionary<string, string?>();
     public Encoding StandardOutputEncoding { get; init; } = new UTF8Encoding(false);
     public Encoding StandardErrorEncoding { get; init; } = new UTF8Encoding(false);
     public int MaxCapturedStandardOutputChars { get; init; } = 32 * 1024 * 1024;
@@ -21,4 +23,3 @@ public sealed record ProcessResult(
     string StandardErrorTail,
     bool WasCancelled,
     TimeSpan Elapsed);
-

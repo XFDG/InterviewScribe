@@ -16,6 +16,10 @@ public sealed class AppPaths
     public string JobsRoot => Path.Combine(LocalRoot, "jobs");
     public string LogsRoot => Path.Combine(LocalRoot, "logs");
     public string RuntimeRoot => Path.Combine(LocalRoot, "runtime");
+    public string QwenRuntimeRoot => Path.Combine(LocalRoot, "qwen-runtime");
+    public string QwenVirtualEnvironmentRoot => Path.Combine(QwenRuntimeRoot, ".venv");
+    public string QwenAsrModelRoot => Path.Combine(ModelsRoot, "Qwen3-ASR-1.7B-hf");
+    public string QwenAlignerModelRoot => Path.Combine(ModelsRoot, "Qwen3-ForcedAligner-0.6B-hf");
     public string SettingsPath => Path.Combine(LocalRoot, "settings.json");
 
     public void EnsureCreated()
@@ -25,6 +29,7 @@ public sealed class AppPaths
         Directory.CreateDirectory(JobsRoot);
         Directory.CreateDirectory(LogsRoot);
         Directory.CreateDirectory(RuntimeRoot);
+        Directory.CreateDirectory(QwenRuntimeRoot);
     }
 
     public string CreateJobDirectory()
@@ -35,4 +40,3 @@ public sealed class AppPaths
         return path;
     }
 }
-

@@ -4,6 +4,8 @@ obj/
 .vs/
 *.user
 *.suo
+__pycache__/
+*.py[cod]
 /runtime/
 /models/
 *.partial

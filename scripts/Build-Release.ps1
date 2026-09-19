@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string] $Version = '0.2.0',
+    [string] $Version = '0.3.0',
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
     [string] $NativeRoot,
@@ -30,6 +30,13 @@ $packageRoot = Join-Path $repositoryRoot 'artifacts\package\InterviewScribe'
 $releaseRoot = Join-Path $repositoryRoot 'artifacts\release'
 $installerScript = Join-Path $repositoryRoot 'packaging\installer.iss'
 $lockFile = Join-Path $repositoryRoot 'packaging\dependencies.lock.json'
+$qwenToolSourceRoot = Join-Path $repositoryRoot 'tools\qwen'
+$qwenManifestFile = Join-Path $repositoryRoot 'src\InterviewScribe.Infrastructure\QwenModelManifest.cs'
+$qwenSidecarFile = Join-Path $qwenToolSourceRoot 'qwen_sidecar.py'
+$qwenToolRequiredFiles = @(
+    'qwen_sidecar.py',
+    'Install-QwenRuntime.ps1'
+)
 
 function Assert-RequiredPayloadFiles {
     param(
@@ -58,6 +65,24 @@ function Assert-RequiredPayloadFiles {
     }
 }
 
+function Get-RequiredRegexCapture {
+    param(
+        [Parameter(Mandatory)] [string] $Source,
+        [Parameter(Mandatory)] [string] $Pattern,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    $match = [System.Text.RegularExpressions.Regex]::Match(
+        $Source,
+        $Pattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    if (-not $match.Success -or $match.Groups.Count -lt 2) {
+        throw "无法从 $Name 读取锁定的模型版本。"
+    }
+
+    return $match.Groups[1].Value
+}
+
 $dotnet = Get-Command 'dotnet.exe' -ErrorAction SilentlyContinue
 if ($null -eq $dotnet) {
     $dotnet = Get-Command 'dotnet' -ErrorAction SilentlyContinue
@@ -82,6 +107,33 @@ if (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
     throw "找不到依赖锁文件：$lockFile"
 }
 $dependencyLock = Get-Content -LiteralPath $lockFile -Raw -Encoding UTF8 | ConvertFrom-Json
+$qwenManifestSource = Get-Content -LiteralPath $qwenManifestFile -Raw -Encoding UTF8
+$qwenSidecarSource = Get-Content -LiteralPath $qwenSidecarFile -Raw -Encoding UTF8
+$lockedAsrRevision = [string]$dependencyLock.models.qwen3Asr17bHf.revision
+$lockedAlignerRevision = [string]$dependencyLock.models.qwen3ForcedAligner06bHf.revision
+$manifestAsrRevision = Get-RequiredRegexCapture `
+    -Source $qwenManifestSource `
+    -Pattern 'internal\s+const\s+string\s+AsrRevision\s*=\s*"([0-9a-f]{40})"' `
+    -Name 'QwenModelManifest.cs'
+$manifestAlignerRevision = Get-RequiredRegexCapture `
+    -Source $qwenManifestSource `
+    -Pattern 'internal\s+const\s+string\s+AlignerRevision\s*=\s*"([0-9a-f]{40})"' `
+    -Name 'QwenModelManifest.cs'
+$sidecarAsrRevision = Get-RequiredRegexCapture `
+    -Source $qwenSidecarSource `
+    -Pattern '^ASR_REVISION\s*=\s*"([0-9a-f]{40})"' `
+    -Name 'qwen_sidecar.py'
+$sidecarAlignerRevision = Get-RequiredRegexCapture `
+    -Source $qwenSidecarSource `
+    -Pattern '^ALIGNER_REVISION\s*=\s*"([0-9a-f]{40})"' `
+    -Name 'qwen_sidecar.py'
+
+$asrRevisionSet = @(@($lockedAsrRevision, $manifestAsrRevision, $sidecarAsrRevision) | Sort-Object -Unique)
+$alignerRevisionSet = @(@($lockedAlignerRevision, $manifestAlignerRevision, $sidecarAlignerRevision) | Sort-Object -Unique)
+if ($asrRevisionSet.Count -ne 1 -or $alignerRevisionSet.Count -ne 1) {
+    throw '依赖锁、C# 运行时与 Python sidecar 中的 Qwen 模型版本不一致。'
+}
+
 $ffmpegRequiredFiles = @($dependencyLock.nativeDependencies.ffmpeg.requiredFiles)
 $transcribeRequiredFiles = @($dependencyLock.nativeDependencies.transcribeCpp.requiredFiles)
 Assert-RequiredPayloadFiles `
@@ -92,6 +144,10 @@ Assert-RequiredPayloadFiles `
     -Root (Join-Path $NativeRoot 'tools\transcribe') `
     -RelativePaths $transcribeRequiredFiles `
     -Name 'transcribe.cpp 原生依赖'
+Assert-RequiredPayloadFiles `
+    -Root $qwenToolSourceRoot `
+    -RelativePaths $qwenToolRequiredFiles `
+    -Name 'Qwen 高精度模式工具'
 
 Push-Location $repositoryRoot
 try {
@@ -110,6 +166,29 @@ try {
     }
 
     if (-not $SkipTests) {
+        $pythonLauncher = Get-Command 'py.exe' -ErrorAction SilentlyContinue
+        $pythonArguments = @('-3')
+        if ($null -eq $pythonLauncher) {
+            $pythonLauncher = Get-Command 'python.exe' -ErrorAction SilentlyContinue
+            $pythonArguments = @()
+        }
+        if ($null -eq $pythonLauncher) {
+            throw '运行 Qwen sidecar 测试需要 Python 3。'
+        }
+
+        Write-Host '运行 Qwen sidecar Python 测试…'
+        & $pythonLauncher.Source @pythonArguments '-m' 'unittest' 'discover' `
+            '-s' (Join-Path $repositoryRoot 'tools\qwen\tests') '-v'
+        if ($LASTEXITCODE -ne 0) {
+            throw "Qwen sidecar Python 测试失败，退出码：$LASTEXITCODE"
+        }
+
+        & $pythonLauncher.Source @pythonArguments '-m' 'py_compile' `
+            (Join-Path $repositoryRoot 'tools\qwen\qwen_sidecar.py')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Qwen sidecar Python 语法检查失败，退出码：$LASTEXITCODE"
+        }
+
         $testProjects = @(Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.csproj' -File -Recurse -ErrorAction SilentlyContinue)
         foreach ($testProject in $testProjects) {
             Write-Host "运行测试：$($testProject.Name)"
@@ -173,6 +252,14 @@ Get-ChildItem -LiteralPath $publishRoot -Force | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $packageRoot -Recurse -Force
 }
 Copy-Item -LiteralPath (Join-Path $NativeRoot 'tools') -Destination (Join-Path $packageRoot 'tools') -Recurse -Force
+$qwenToolPackageRoot = Join-Path $packageRoot 'tools\qwen'
+New-Item -ItemType Directory -Path $qwenToolPackageRoot -Force | Out-Null
+foreach ($qwenToolFile in $qwenToolRequiredFiles) {
+    Copy-Item `
+        -LiteralPath (Join-Path $qwenToolSourceRoot $qwenToolFile) `
+        -Destination (Join-Path $qwenToolPackageRoot $qwenToolFile) `
+        -Force
+}
 $enginePackageRoot = Join-Path $packageRoot 'tools\engine'
 New-Item -ItemType Directory -Path $enginePackageRoot -Force | Out-Null
 Get-ChildItem -LiteralPath $enginePublishRoot -Force | ForEach-Object {
@@ -191,6 +278,10 @@ Assert-RequiredPayloadFiles `
     -Root (Join-Path $packageRoot 'tools\transcribe') `
     -RelativePaths $transcribeRequiredFiles `
     -Name 'transcribe.cpp 打包结果'
+Assert-RequiredPayloadFiles `
+    -Root $qwenToolPackageRoot `
+    -RelativePaths $qwenToolRequiredFiles `
+    -Name 'Qwen 高精度模式打包结果'
 
 $appExecutables = @(@(
         (Join-Path $packageRoot 'InterviewScribe.exe'),

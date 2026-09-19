@@ -35,6 +35,23 @@ public sealed class ManagedProcessRunner
             startInfo.ArgumentList.Add(argument);
         }
 
+        foreach (var (name, value) in spec.EnvironmentVariables)
+        {
+            if (string.IsNullOrWhiteSpace(name) || name.Contains('='))
+            {
+                throw new ArgumentException("子进程环境变量名称无效。", nameof(spec));
+            }
+
+            if (value is null)
+            {
+                startInfo.Environment.Remove(name);
+            }
+            else
+            {
+                startInfo.Environment[name] = value;
+            }
+        }
+
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         using var job = new WindowsJobObject();
         var stopwatch = Stopwatch.StartNew();

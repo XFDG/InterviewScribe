@@ -30,6 +30,28 @@ public sealed class ManagedProcessRunnerTests
                 .WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
+    [Fact]
+    public async Task RunAsync_PassesEnvironmentOnlyThroughChildProcessSpec()
+    {
+        const string variableName = "INTERVIEWSCRIBE_TEST_CHILD_SECRET";
+        const string variableValue = "only-in-child-67c09ac8";
+        var runner = new ManagedProcessRunner();
+        var spec = PowerShellSpec(
+            $"[Console]::Out.WriteLine([Environment]::GetEnvironmentVariable('{variableName}'))") with
+        {
+            EnvironmentVariables = new Dictionary<string, string?>
+            {
+                [variableName] = variableValue,
+            },
+        };
+
+        var result = await runner.RunAsync(spec);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal([variableValue], result.StandardOutputLines);
+        Assert.Null(Environment.GetEnvironmentVariable(variableName));
+    }
+
     private static ProcessSpec PowerShellSpec(string command)
     {
         var executable = Path.Combine(

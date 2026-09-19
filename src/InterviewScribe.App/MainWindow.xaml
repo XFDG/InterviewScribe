@@ -56,8 +56,8 @@
                 </StackPanel>
                 <Border Grid.Column="1" Background="#20304F" CornerRadius="15" Padding="13,7" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
-                        <Ellipse Width="8" Height="8" Fill="#54D6A1" Margin="0,0,8,0" />
-                        <TextBlock Text="完全本地处理" Foreground="#EAF8F2" FontSize="12" />
+                        <Ellipse x:Name="ProcessingModeStatusDot" Width="8" Height="8" Fill="#54D6A1" Margin="0,0,8,0" />
+                        <TextBlock x:Name="ProcessingModeStatusText" Text="完全本地处理" Foreground="#EAF8F2" FontSize="12" />
                     </StackPanel>
                 </Border>
             </Grid>
@@ -365,13 +365,117 @@
                         </StackPanel>
                     </Border>
 
-                    <Border Style="{StaticResource CardStyle}" Margin="0,18,0,0">
+                    <Border x:Name="RecognitionModePanel" Style="{StaticResource CardStyle}" Margin="0,18,0,0">
                         <StackPanel>
                             <TextBlock Text="识别方案" Style="{StaticResource SectionTitleStyle}" />
+
+                            <RadioButton x:Name="MossLocalModeRadioButton"
+                                         GroupName="TranscriptionMode"
+                                         IsChecked="True"
+                                         Checked="TranscriptionMode_Checked"
+                                         Margin="0,16,0,0"
+                                         Cursor="Hand">
+                                <StackPanel>
+                                    <TextBlock Text="MOSS 本地快速" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="Q8_0 · 断网可用 · 速度优先"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,0" />
+                                </StackPanel>
+                            </RadioButton>
+
+                            <RadioButton x:Name="QwenLocalModeRadioButton"
+                                         GroupName="TranscriptionMode"
+                                         Checked="TranscriptionMode_Checked"
+                                         Margin="0,15,0,0"
+                                         Cursor="Hand">
+                                <StackPanel>
+                                    <TextBlock Text="Qwen3-ASR 1.7B 本地高精度" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="本地权重 · GPU 优先 · 文字准确度优先"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,0" />
+                                </StackPanel>
+                            </RadioButton>
+
+                            <Border x:Name="QwenLocalSetupPanel"
+                                    Visibility="Collapsed"
+                                    Background="#F8F8FF"
+                                    BorderBrush="#DDE0FA"
+                                    BorderThickness="1"
+                                    CornerRadius="9"
+                                    Padding="12"
+                                    Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="首次使用需安装 Python 运行环境、MOSS 说话人模型、Qwen3-ASR 1.7B 和强制对齐模型。"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               LineHeight="18" />
+                                    <Button x:Name="InstallQwenRuntimeButton"
+                                            Content="安装高精度组件…"
+                                            Style="{StaticResource TinyButtonStyle}"
+                                            HorizontalAlignment="Left"
+                                            Margin="0,10,0,0"
+                                            Click="InstallQwenRuntime_Click" />
+                                </StackPanel>
+                            </Border>
+
+                            <RadioButton x:Name="QwenSdkModeRadioButton"
+                                         GroupName="TranscriptionMode"
+                                         Checked="TranscriptionMode_Checked"
+                                         Margin="0,15,0,0"
+                                         Cursor="Hand">
+                                <StackPanel>
+                                    <TextBlock Text="Qwen 官方 SDK 云端高精度" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="无需本地 Qwen 权重 · 需网络 · 可能产生 API 费用"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,0" />
+                                </StackPanel>
+                            </RadioButton>
+
+                            <Border x:Name="QwenSdkSettingsPanel"
+                                    Visibility="Collapsed"
+                                    Background="#FFF9ED"
+                                    BorderBrush="#F2D59C"
+                                    BorderThickness="1"
+                                    CornerRadius="9"
+                                    Padding="12"
+                                    Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="DashScope API Key（可留空）" FontSize="12" FontWeight="SemiBold" />
+                                    <PasswordBox x:Name="SdkApiKeyPasswordBox"
+                                                 Margin="0,7,0,0"
+                                                 Padding="9,7"
+                                                 FontSize="13"
+                                                 ToolTip="仅在本次运行的内存中使用，不会写入日志或设置文件" />
+                                    <TextBlock Text="留空时使用系统环境变量 DASHSCOPE_API_KEY。默认北京区域；其他区域还需配置 DASHSCOPE_API_REGION 和 DASHSCOPE_WORKSPACE_ID。密钥不会保存或写入运行记录。"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               LineHeight="18"
+                                               Margin="0,7,0,0" />
+                                    <Button x:Name="InstallQwenSdkRuntimeButton"
+                                            Content="安装 SDK 运行组件…"
+                                            Style="{StaticResource TinyButtonStyle}"
+                                            HorizontalAlignment="Left"
+                                            Margin="0,10,0,0"
+                                            Click="InstallQwenSdkRuntime_Click" />
+                                </StackPanel>
+                            </Border>
+
                             <Border Background="{StaticResource PrimarySoftBrush}" CornerRadius="11" Padding="15" Margin="0,16,0,0">
                                 <StackPanel>
-                                    <TextBlock Text="MOSS-Transcribe-Diarize" FontSize="14" FontWeight="SemiBold" Foreground="#4145C9" />
-                                    <TextBlock Text="Q8_0 · 本地模型" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" />
+                                    <TextBlock x:Name="RecognitionSummaryTitleText"
+                                               Text="MOSS-Transcribe-Diarize"
+                                               FontSize="14"
+                                               FontWeight="SemiBold"
+                                               Foreground="#4145C9" />
+                                    <TextBlock x:Name="RecognitionSummaryDetailText"
+                                               Text="文字、时间轴和说话人均在本地生成。"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               LineHeight="18"
+                                               Margin="0,5,0,0" />
                                 </StackPanel>
                             </Border>
                             <Grid Margin="0,17,0,0">
@@ -404,8 +508,8 @@
                     <Border Style="{StaticResource CardStyle}" Margin="0,18,0,0">
                         <StackPanel>
                             <StackPanel Orientation="Horizontal">
-                                <Border Width="34" Height="34" CornerRadius="17" Background="{StaticResource SuccessSoftBrush}" Margin="0,0,11,0">
-                                    <TextBlock Text="&#xE72E;"
+                                <Border x:Name="PrivacyIconBorder" Width="34" Height="34" CornerRadius="17" Background="{StaticResource SuccessSoftBrush}" Margin="0,0,11,0">
+                                    <TextBlock x:Name="PrivacyIconText" Text="&#xE72E;"
                                                FontFamily="Segoe Fluent Icons"
                                                FontSize="16"
                                                Foreground="{StaticResource SuccessBrush}"
@@ -413,11 +517,12 @@
                                                VerticalAlignment="Center" />
                                 </Border>
                                 <StackPanel>
-                                    <TextBlock Text="隐私保护" FontSize="15" FontWeight="SemiBold" />
-                                    <TextBlock Text="文件不会上传云端" Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" />
+                                    <TextBlock x:Name="PrivacyTitleText" Text="隐私保护" FontSize="15" FontWeight="SemiBold" />
+                                    <TextBlock x:Name="PrivacySubtitleText" Text="文件不会上传云端" Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" />
                                 </StackPanel>
                             </StackPanel>
-                            <TextBlock Text="视频、临时音频和转写文字都只在这台电脑上处理。首次使用仅下载公开模型文件。"
+                            <TextBlock x:Name="PrivacyDetailText"
+                                       Text="视频、临时音频和转写文字都只在这台电脑上处理。首次使用仅下载公开模型文件。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="20"
@@ -441,7 +546,7 @@
 
         <Border Grid.Row="2" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="34,11">
             <Grid>
-                <TextBlock Text="InterviewScribe · 本地离线转写" Style="{StaticResource CaptionStyle}" />
+                <TextBlock x:Name="FooterModeText" Text="InterviewScribe · 本地离线转写" Style="{StaticResource CaptionStyle}" />
                 <TextBlock x:Name="FooterStatusText" Text="就绪" Style="{StaticResource CaptionStyle}" HorizontalAlignment="Right" />
             </Grid>
         </Border>

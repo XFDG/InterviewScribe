@@ -11,6 +11,8 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 public sealed class TranscriptionPipeline
 {
     private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(2);
+    private const string QwenLocalDisplayName = "Qwen3-ASR-1.7B-hf + MOSS 说话人区分";
+    private const string QwenSdkDisplayName = "qwen3-asr-flash SDK + MOSS 说话人区分";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -54,6 +56,10 @@ public sealed class TranscriptionPipeline
         };
         var sourcePath = ValidateSourcePath(request.SourcePath);
         var outputDirectory = ValidateOutputDirectory(request.OutputDirectory);
+        if (!Enum.IsDefined(request.Mode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "不支持所选的识别模式。");
+        }
 
         _paths.EnsureCreated();
         CleanupOldJobs();
@@ -64,10 +70,12 @@ public sealed class TranscriptionPipeline
         var ffprobePath = _runtimeLocator.FindFfprobe();
         var engineHostPath = _runtimeLocator.FindEngineHost();
         var transcribeRuntimeDirectory = _runtimeLocator.FindTranscribeRuntimeDirectory();
+        var qwenRuntime = ResolveQwenRuntime(request.Mode, request.SdkApiKey);
 
         var jobDirectory = _paths.CreateJobDirectory();
         var wavPath = Path.Combine(jobDirectory, "audio.wav");
-        var engineResultPath = Path.Combine(jobDirectory, "engine-result.json");
+        var mossResultPath = Path.Combine(jobDirectory, "moss-result.json");
+        var qwenResultPath = Path.Combine(jobDirectory, "qwen-result.json");
         var logMessages = new List<string>();
         var succeeded = false;
 
@@ -143,7 +151,7 @@ public sealed class TranscriptionPipeline
                     transcribeRuntimeDirectory,
                     modelPath,
                     wavPath,
-                    engineResultPath,
+                    mossResultPath,
                     jobDirectory,
                     progress,
                     cancellationToken).ConfigureAwait(false);
@@ -157,8 +165,8 @@ public sealed class TranscriptionPipeline
                     JobState.ReadyToTranscribe,
                     "显卡推理不可用，正在切换到 CPU…"));
 
-                TryDelete(engineResultPath);
-                TryDelete(engineResultPath + ".tmp");
+                TryDelete(mossResultPath);
+                TryDelete(mossResultPath + ".tmp");
                 try
                 {
                     engineRun = await RunEngineAsync(
@@ -168,7 +176,7 @@ public sealed class TranscriptionPipeline
                         transcribeRuntimeDirectory,
                         modelPath,
                         wavPath,
-                        engineResultPath,
+                        mossResultPath,
                         jobDirectory,
                         progress,
                         cancellationToken).ConfigureAwait(false);
@@ -186,8 +194,52 @@ public sealed class TranscriptionPipeline
             progress?.Report(new OperationProgress(
                 JobState.ValidatingResult,
                 "正在检查说话人、时间轴和结果完整性…"));
-            var engineResult = await ReadEngineResultAsync(engineResultPath, cancellationToken).ConfigureAwait(false);
-            var document = CreateValidatedDocument(engineResult, sourcePath, mediaInfo.Duration);
+            var mossResult = await ReadEngineResultAsync(mossResultPath, cancellationToken).ConfigureAwait(false);
+            TranscriptDocument document;
+            if (request.Mode == TranscriptionMode.MossLocalFast)
+            {
+                document = CreateValidatedDocument(
+                    mossResult,
+                    sourcePath,
+                    mediaInfo.Duration,
+                    ModelStore.MossQ8.DisplayName,
+                    ModelStore.MossQ8.Revision);
+            }
+            else
+            {
+                // Validate the diarization track before launching the more expensive
+                // high-accuracy pass. Qwen supplies text/timestamps; MOSS supplies speakers.
+                _ = CreateValidatedDocument(
+                    mossResult,
+                    sourcePath,
+                    mediaInfo.Duration,
+                    ModelStore.MossQ8.DisplayName,
+                    ModelStore.MossQ8.Revision);
+
+                var highAccuracyRun = await RunQwenAsync(
+                    request.Mode,
+                    qwenRuntime ?? throw new InvalidOperationException("Qwen 运行环境未初始化。"),
+                    languageSelection,
+                    wavPath,
+                    qwenResultPath,
+                    mossResultPath,
+                    jobDirectory,
+                    progress,
+                    cancellationToken).ConfigureAwait(false);
+                AddLog(
+                    logMessages,
+                    $"Qwen 高精度识别完成（耗时 {FormatDuration(highAccuracyRun.Elapsed)}）。");
+
+                var qwenResult = await ReadEngineResultAsync(qwenResultPath, cancellationToken).ConfigureAwait(false);
+                var mergedResult = MergeHighAccuracyResults(request.Mode, qwenResult, mossResult);
+                var (modelName, modelRevision) = GetHighAccuracyModelIdentity(request.Mode);
+                document = CreateValidatedDocument(
+                    mergedResult,
+                    sourcePath,
+                    mediaInfo.Duration,
+                    modelName,
+                    modelRevision);
+            }
 
             AddLog(
                 logMessages,
@@ -218,9 +270,9 @@ public sealed class TranscriptionPipeline
         finally
         {
             // Extracted WAV can be large and is always reproducible from the user's
-            // untouched source.  Keep diagnostic text/JSON after failures, but not WAV.
-            TryDelete(wavPath);
-            TryDelete(wavPath + ".tmp");
+            // untouched source. Keep diagnostic text/JSON after failures, but not
+            // the source WAV or Qwen's derived upload/alignment chunks.
+            CleanupJobAudioArtifacts(jobDirectory);
             if (succeeded)
             {
                 TryDeleteDirectory(jobDirectory);
@@ -293,6 +345,243 @@ public sealed class TranscriptionPipeline
         return new EngineRunOutcome(result.Elapsed);
     }
 
+    private QwenRuntime? ResolveQwenRuntime(TranscriptionMode mode, string? requestedApiKey)
+    {
+        if (mode == TranscriptionMode.MossLocalFast)
+        {
+            return null;
+        }
+
+        var pythonPath = _runtimeLocator.FindQwenPython();
+        var sidecarPath = _runtimeLocator.FindQwenSidecar();
+        if (mode == TranscriptionMode.QwenLocalHighAccuracy)
+        {
+            return new QwenRuntime(
+                pythonPath,
+                sidecarPath,
+                _runtimeLocator.FindQwenAsrModelDirectory(),
+                _runtimeLocator.FindQwenAlignerModelDirectory(),
+                null);
+        }
+
+        var apiKey = string.IsNullOrWhiteSpace(requestedApiKey)
+            ? Environment.GetEnvironmentVariable("DASHSCOPE_API_KEY")
+            : requestedApiKey;
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            throw new InvalidOperationException(
+                "SDK 高精度模式需要阿里云 Model Studio API Key。" +
+                "请在界面中临时输入，或在 Windows 用户环境变量 DASHSCOPE_API_KEY 中配置。");
+        }
+
+        return new QwenRuntime(pythonPath, sidecarPath, null, null, apiKey.Trim());
+    }
+
+    private async Task<EngineRunOutcome> RunQwenAsync(
+        TranscriptionMode mode,
+        QwenRuntime runtime,
+        LanguageSelection languageSelection,
+        string wavPath,
+        string resultPath,
+        string mossResultPath,
+        string jobDirectory,
+        IProgress<OperationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var isLocal = mode == TranscriptionMode.QwenLocalHighAccuracy;
+        progress?.Report(new OperationProgress(
+            JobState.Transcribing,
+            isLocal
+                ? "正在用本地 Qwen3-ASR-1.7B 高精度识别…"
+                : "正在通过 Qwen SDK 高精度识别…"));
+
+        var environment = new Dictionary<string, string?>
+        {
+            ["PYTHONUTF8"] = "1",
+            ["PYTHONIOENCODING"] = "utf-8",
+        };
+        if (isLocal)
+        {
+            // The local mode is intentionally strict: no silent network fallback
+            // after installation, even if a Hugging Face token is available.
+            environment["HF_HUB_OFFLINE"] = "1";
+            environment["TRANSFORMERS_OFFLINE"] = "1";
+        }
+        else
+        {
+            environment["DASHSCOPE_API_KEY"] = runtime.ApiKey;
+        }
+
+        string? lastProgressMessage = null;
+        var result = await _processRunner.RunAsync(
+            new ProcessSpec
+            {
+                FileName = runtime.PythonPath,
+                WorkingDirectory = Path.GetDirectoryName(runtime.SidecarPath),
+                Arguments = BuildQwenArguments(
+                    mode,
+                    runtime.SidecarPath,
+                    runtime.AsrModelDirectory,
+                    runtime.AlignerModelDirectory,
+                    wavPath,
+                    resultPath,
+                    mossResultPath,
+                    languageSelection),
+                EnvironmentVariables = environment,
+                StandardOutputLogPath = Path.Combine(jobDirectory, "qwen.stdout.log"),
+                StandardErrorLogPath = Path.Combine(jobDirectory, "qwen.stderr.log"),
+            },
+            onStandardError: line =>
+            {
+                var engineEvent = TryParseEngineEvent(line);
+                if (engineEvent is not { Type: "progress" } ||
+                    string.IsNullOrWhiteSpace(engineEvent.Message) ||
+                    string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                lastProgressMessage = engineEvent.Message;
+                progress?.Report(new OperationProgress(JobState.Transcribing, engineEvent.Message.Trim()));
+            },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Qwen 高精度识别失败：{ExtractEngineError(result.StandardErrorTail)} " +
+                $"诊断文件保存在：{jobDirectory}");
+        }
+
+        if (!File.Exists(resultPath) || new FileInfo(resultPath).Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Qwen 识别进程已结束，但没有生成结果文件。诊断文件保存在：{jobDirectory}");
+        }
+
+        return new EngineRunOutcome(result.Elapsed);
+    }
+
+    internal static IReadOnlyList<string> BuildQwenArguments(
+        TranscriptionMode mode,
+        string sidecarPath,
+        string? asrModelDirectory,
+        string? alignerModelDirectory,
+        string wavPath,
+        string resultPath,
+        string? speakerTimelinePath,
+        LanguageSelection languageSelection)
+    {
+        ArgumentNullException.ThrowIfNull(languageSelection);
+        if (mode is not (TranscriptionMode.QwenLocalHighAccuracy or TranscriptionMode.QwenSdkHighAccuracy))
+        {
+            throw new ArgumentOutOfRangeException(nameof(mode), "Qwen 参数只适用于高精度模式。");
+        }
+
+        var arguments = new List<string>
+        {
+            "-X", "utf8",
+            "-I",
+            sidecarPath,
+            "--mode", mode == TranscriptionMode.QwenLocalHighAccuracy ? "local" : "sdk",
+            "--audio", wavPath,
+            "--output", resultPath,
+            "--language", languageSelection.EngineArgument,
+        };
+
+        if (mode == TranscriptionMode.QwenLocalHighAccuracy)
+        {
+            if (string.IsNullOrWhiteSpace(asrModelDirectory) || string.IsNullOrWhiteSpace(alignerModelDirectory))
+            {
+                throw new ArgumentException("本地 Qwen 模式需要 ASR 和强制对齐模型目录。");
+            }
+
+            arguments.AddRange(
+            [
+                "--model-dir", asrModelDirectory,
+                "--aligner-dir", alignerModelDirectory,
+                "--device", "auto",
+            ]);
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(speakerTimelinePath))
+            {
+                throw new ArgumentException("SDK Qwen 模式需要 MOSS 说话人时间轴。");
+            }
+
+            arguments.AddRange(
+            [
+                "--sdk-model", "qwen3-asr-flash",
+                "--speaker-timeline", speakerTimelinePath,
+            ]);
+        }
+
+        return arguments;
+    }
+
+    private static EngineResultDto MergeHighAccuracyResults(
+        TranscriptionMode mode,
+        EngineResultDto qwenResult,
+        EngineResultDto mossResult)
+    {
+        if (qwenResult.Segments is null)
+        {
+            throw new InvalidDataException("Qwen 识别结果没有 segments 字段。");
+        }
+
+        if (mossResult.Segments is null)
+        {
+            throw new InvalidDataException("MOSS 说话人结果没有 segments 字段。");
+        }
+
+        var mergedSegments = TimelineSpeakerMerger.Merge(qwenResult.Segments, mossResult.Segments)
+            .Select(segment => new EngineSegmentDto(
+                segment.StartMs,
+                segment.EndMs,
+                segment.SpeakerId,
+                segment.Text))
+            .ToArray();
+        var warnings = new List<string>();
+        if (qwenResult.Warnings is not null)
+        {
+            warnings.AddRange(qwenResult.Warnings);
+        }
+
+        if (mossResult.Warnings is not null)
+        {
+            warnings.AddRange(mossResult.Warnings);
+        }
+
+        warnings.Add(mode == TranscriptionMode.QwenSdkHighAccuracy
+            ? "Qwen 云端生成文字；时间轴是本地 VAD 按 MOSS 说话人边界切出的分段边界，不是云端逐词时间戳。"
+            : "Qwen 本地模型生成文字与逐词对齐；说话人标签来自本地 MOSS 轨道并按时间重叠合并。");
+        return new EngineResultDto(
+            qwenResult.SourceFileName,
+            qwenResult.DurationMs > 0 ? qwenResult.DurationMs : mossResult.DurationMs,
+            qwenResult.Model,
+            $"{qwenResult.EngineVersion} + MOSS {mossResult.EngineVersion}",
+            $"Qwen {qwenResult.Backend} + MOSS {mossResult.Backend}",
+            qwenResult.Language,
+            qwenResult.FullText,
+            qwenResult.RawText,
+            mergedSegments,
+            warnings.Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.Ordinal).ToArray(),
+            qwenResult.IsPartial || mossResult.IsPartial);
+    }
+
+    private static (string Name, string Revision) GetHighAccuracyModelIdentity(TranscriptionMode mode) =>
+        mode switch
+        {
+            TranscriptionMode.QwenLocalHighAccuracy => (
+                QwenLocalDisplayName,
+                $"ASR {QwenModelManifest.AsrRevision}; Aligner {QwenModelManifest.AlignerRevision}; MOSS {ModelStore.MossQ8.Revision}"),
+            TranscriptionMode.QwenSdkHighAccuracy => (
+                QwenSdkDisplayName,
+                $"Qwen SDK service-managed; MOSS {ModelStore.MossQ8.Revision}"),
+            _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+        };
+
     internal static IReadOnlyList<string> BuildEngineArguments(
         string runtimeDirectory,
         string modelPath,
@@ -342,7 +631,9 @@ public sealed class TranscriptionPipeline
     private static TranscriptDocument CreateValidatedDocument(
         EngineResultDto result,
         string sourcePath,
-        TimeSpan mediaDuration)
+        TimeSpan mediaDuration,
+        string modelName,
+        string modelRevision)
     {
         if (result.IsPartial)
         {
@@ -388,8 +679,8 @@ public sealed class TranscriptionPipeline
         {
             SourceFileName = Path.GetFileName(sourcePath),
             MediaDuration = mediaDuration,
-            ModelName = ModelStore.MossQ8.DisplayName,
-            ModelRevision = ModelStore.MossQ8.Revision,
+            ModelName = modelName,
+            ModelRevision = modelRevision,
             EngineVersion = string.IsNullOrWhiteSpace(result.EngineVersion)
                 ? result.Backend
                 : $"{result.EngineVersion} / {result.Backend}",
@@ -471,6 +762,9 @@ public sealed class TranscriptionPipeline
             {
                 try
                 {
+                    // The application is single-instance. Anything left before a
+                    // new job starts belongs to a cancelled or crashed older run.
+                    CleanupJobAudioArtifacts(directory);
                     if (Directory.GetLastWriteTimeUtc(directory) < cutoff)
                     {
                         Directory.Delete(directory, recursive: true);
@@ -479,6 +773,30 @@ public sealed class TranscriptionPipeline
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
                 }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    internal static void CleanupJobAudioArtifacts(string jobDirectory)
+    {
+        TryDelete(Path.Combine(jobDirectory, "audio.wav"));
+        TryDelete(Path.Combine(jobDirectory, "audio.wav.tmp"));
+        if (!Directory.Exists(jobDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var directory in Directory.EnumerateDirectories(
+                         jobDirectory,
+                         ".qwen-audio-*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                TryDeleteDirectory(directory);
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -578,6 +896,12 @@ public sealed class TranscriptionPipeline
 
     private sealed record EngineEvent(string Type, string Message, double? Fraction, int? NativeStatus);
     private sealed record EngineRunOutcome(TimeSpan Elapsed);
+    private sealed record QwenRuntime(
+        string PythonPath,
+        string SidecarPath,
+        string? AsrModelDirectory,
+        string? AlignerModelDirectory,
+        string? ApiKey);
 
     private sealed class EngineRunException(string message, int exitCode) : Exception(message)
     {
