@@ -52,6 +52,72 @@ public sealed class TranscriptFormatterTests
     }
 
     [Fact]
+    public void ToTxt_WhenTimestampsAreDisabled_KeepsSpeakerLabels()
+    {
+        var options = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = false,
+            IncludeSpeakers = true
+        };
+
+        var text = TranscriptFormatter.ToTxt(TestDocumentFactory.Create(), options: options);
+
+        Assert.DoesNotContain("[00:", text);
+        Assert.Contains("说话人 1", text);
+        Assert.Contains("说话人 2", text);
+    }
+
+    [Fact]
+    public void ToTxt_WhenSpeakersAreDisabled_KeepsTimelineAndHidesCustomNames()
+    {
+        var options = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = true,
+            IncludeSpeakers = false
+        };
+        var speakerNames = new Dictionary<int, string> { [1] = "候选人", [2] = "面试官" };
+
+        var text = TranscriptFormatter.ToTxt(TestDocumentFactory.Create(), speakerNames, options);
+
+        Assert.Contains("[00:00:00.000 - 00:00:02.000]", text);
+        Assert.DoesNotContain("说话人", text);
+        Assert.DoesNotContain("候选人", text);
+        Assert.DoesNotContain("面试官", text);
+    }
+
+    [Fact]
+    public void ToTxt_WhenTimelineAndSpeakersAreDisabled_ProducesPlainParagraphs()
+    {
+        var options = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = false,
+            IncludeSpeakers = false
+        };
+
+        var text = TranscriptFormatter.ToTxt(TestDocumentFactory.Create(), options: options);
+
+        Assert.DoesNotContain("[00:", text);
+        Assert.DoesNotContain("说话人", text);
+        Assert.Contains($"Hello world{Environment.NewLine}{Environment.NewLine}你好世界", text);
+    }
+
+    [Fact]
+    public void ToSrt_WhenSpeakersAreDisabled_KeepsRequiredSubtitleTimestamps()
+    {
+        var options = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = false,
+            IncludeSpeakers = false
+        };
+
+        var srt = TranscriptFormatter.ToSrt(TestDocumentFactory.Create(), options: options);
+
+        Assert.Contains("00:00:00,000 --> 00:00:01,000", srt);
+        Assert.Contains("Hello", srt);
+        Assert.DoesNotContain("[说话人", srt);
+    }
+
+    [Fact]
     public void ToJson_UsesCamelCaseAndKeepsUnicodeData()
     {
         var document = TestDocumentFactory.Create();

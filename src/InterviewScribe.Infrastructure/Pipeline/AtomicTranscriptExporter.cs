@@ -9,8 +9,10 @@ internal static class AtomicTranscriptExporter
     public static async Task<(string TxtPath, string SrtPath, string JsonPath)> ExportAsync(
         TranscriptDocument document,
         string outputDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TranscriptFormattingOptions? formattingOptions = null)
     {
+        formattingOptions ??= TranscriptFormattingOptions.Default;
         Directory.CreateDirectory(outputDirectory);
         VerifyWritable(outputDirectory);
 
@@ -24,8 +26,14 @@ internal static class AtomicTranscriptExporter
         var committed = new List<string>();
         try
         {
-            pending.Add(await WriteTemporaryAsync(txtPath, TranscriptFormatter.ToTxt(document), cancellationToken).ConfigureAwait(false));
-            pending.Add(await WriteTemporaryAsync(srtPath, TranscriptFormatter.ToSrt(document), cancellationToken).ConfigureAwait(false));
+            pending.Add(await WriteTemporaryAsync(
+                txtPath,
+                TranscriptFormatter.ToTxt(document, options: formattingOptions),
+                cancellationToken).ConfigureAwait(false));
+            pending.Add(await WriteTemporaryAsync(
+                srtPath,
+                TranscriptFormatter.ToSrt(document, options: formattingOptions),
+                cancellationToken).ConfigureAwait(false));
             pending.Add(await WriteTemporaryAsync(jsonPath, TranscriptFormatter.ToJson(document) + Environment.NewLine, cancellationToken).ConfigureAwait(false));
 
             cancellationToken.ThrowIfCancellationRequested();

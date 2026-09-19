@@ -45,7 +45,30 @@ internal static class Program
                 runParams.Timestamps = NativeMethods.TimestampKind.Segment;
                 runParams.Diarize = NativeMethods.DiarizeMode.On;
 
-                var status = NativeMethods.TranscribeRun(session, audio.Samples, audio.Samples.Length, ref runParams);
+                var languagePointer = IntPtr.Zero;
+                NativeMethods.Status status;
+                try
+                {
+                    if (options.Language is not null)
+                    {
+                        languagePointer = Marshal.StringToCoTaskMemUTF8(options.Language);
+                        runParams.Language = languagePointer;
+                    }
+
+                    status = NativeMethods.TranscribeRun(
+                        session,
+                        audio.Samples,
+                        audio.Samples.Length,
+                        ref runParams);
+                }
+                finally
+                {
+                    if (languagePointer != IntPtr.Zero)
+                    {
+                        Marshal.FreeCoTaskMem(languagePointer);
+                    }
+                }
+
                 if (status != NativeMethods.Status.Ok)
                 {
                     throw new EngineException(
@@ -181,14 +204,16 @@ internal sealed record Arguments(
     string ModelPath,
     string AudioPath,
     string OutputPath,
-    NativeMethods.BackendRequest Backend)
+    NativeMethods.BackendRequest Backend,
+    string? Language)
 {
     public static Arguments Parse(string[] args)
     {
         if (args.Length == 1 && args[0] is "--help" or "-h")
         {
             throw new EngineException(
-                "用法：InterviewScribe.EngineHost --runtime <dir> --model <gguf> --audio <wav> --output <json> [--backend auto|cuda|vulkan|cpu]");
+                "用法：InterviewScribe.EngineHost --runtime <dir> --model <gguf> --audio <wav> --output <json> " +
+                "[--backend auto|cuda|vulkan|cpu] [--language auto|zh|en]");
         }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -230,14 +255,26 @@ internal sealed record Arguments(
             "cpu" => NativeMethods.BackendRequest.Cpu,
             _ => throw new EngineException($"不支持的推理后端：{backendName}"),
         };
+        var language = ResolveNativeLanguage(values.GetValueOrDefault("--language", "auto"));
 
         return new Arguments(
             Path.GetFullPath(runtime),
             Path.GetFullPath(model),
             Path.GetFullPath(audio),
             Path.GetFullPath(output),
-            backend);
+            backend,
+            language);
     }
+
+    internal static string? ResolveNativeLanguage(string languageName) =>
+        languageName switch
+        {
+            "auto" => null,
+            "zh" => "zh",
+            "en" => "en",
+            _ => throw new EngineException(
+                $"不支持的识别语言：{languageName}。请使用 auto、zh 或 en。"),
+        };
 
     private static string Required(IReadOnlyDictionary<string, string> values, string name) =>
         values.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)

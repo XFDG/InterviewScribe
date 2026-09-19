@@ -166,13 +166,34 @@ public partial class MainWindow : Window
             return;
         }
 
+        var languageCodes = GetSelectedLanguageCodes();
+        if (languageCodes.Count == 0)
+        {
+            LanguageValidationText.Visibility = Visibility.Visible;
+            ChineseLanguageCheckBox.Focus();
+            ShowFriendlyError("请至少选择中文或 English 中的一种识别语言。", "缺少识别语言");
+            return;
+        }
+
+        var formattingOptions = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = IncludeTimelineCheckBox.IsChecked == true,
+            IncludeSpeakers = IncludeSpeakersCheckBox.IsChecked == true
+        };
+
         PrepareForRun();
+        AppendLog($"识别语言：{FormatSelectedLanguages(languageCodes)}");
+        AppendLog($"TXT 时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人标注：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
         _runCancellation = new CancellationTokenSource();
         var progress = new Progress<OperationProgress>(UpdateProgress);
 
         try
         {
-            var request = new PipelineRequest(sourcePath, outputDirectory);
+            var request = new PipelineRequest(sourcePath, outputDirectory)
+            {
+                LanguageCodes = languageCodes,
+                FormattingOptions = formattingOptions
+            };
             _pipeline ??= new TranscriptionPipeline();
             var result = await _pipeline.RunAsync(request, progress, _runCancellation.Token);
 
@@ -205,9 +226,10 @@ public partial class MainWindow : Window
             _isRunning = false;
             ChangeFileButton.IsEnabled = true;
             DropZoneBorder.IsEnabled = true;
+            SettingsPanel.IsEnabled = true;
             CancelButton.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = true;
-            StartButton.IsEnabled = !string.IsNullOrWhiteSpace(_sourcePath);
+            StartButton.IsEnabled = !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage();
 
             if (_closeAfterCancellation)
             {
@@ -219,6 +241,13 @@ public partial class MainWindow : Window
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
         RequestCancellation();
+    }
+
+    private void LanguageCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        var hasSelectedLanguage = HasSelectedLanguage();
+        LanguageValidationText.Visibility = hasSelectedLanguage ? Visibility.Collapsed : Visibility.Visible;
+        StartButton.IsEnabled = !_isRunning && !string.IsNullOrWhiteSpace(_sourcePath) && hasSelectedLanguage;
     }
 
     private void OpenTxt_Click(object sender, RoutedEventArgs e)
@@ -329,7 +358,7 @@ public partial class MainWindow : Window
             EmptyFilePanel.Visibility = Visibility.Collapsed;
             SelectedFilePanel.Visibility = Visibility.Visible;
             OutputFolderTextBox.Text = Path.Combine(file.DirectoryName ?? Environment.CurrentDirectory, "转写结果");
-            StartButton.IsEnabled = true;
+            StartButton.IsEnabled = HasSelectedLanguage();
             ResultCard.Visibility = Visibility.Collapsed;
             _lastTxtPath = null;
             _lastOutputDirectory = null;
@@ -353,6 +382,7 @@ public partial class MainWindow : Window
         LogTextBox.Clear();
         ChangeFileButton.IsEnabled = false;
         DropZoneBorder.IsEnabled = false;
+        SettingsPanel.IsEnabled = false;
         StartButton.IsEnabled = false;
         CancelButton.IsEnabled = true;
         CancelButton.Visibility = Visibility.Visible;
@@ -427,7 +457,7 @@ public partial class MainWindow : Window
         var partialLabel = result.Document.IsPartial ? " · 注意：结果不完整" : string.Empty;
         ResultSummaryText.Text = $"{result.Document.Segments.Count:N0} 个时间段 · {speakers:N0} 位说话人 · {FormatDuration(result.Document.MediaDuration)}{partialLabel}";
 
-        var preview = TranscriptFormatter.ToTxt(result.Document);
+        var preview = TranscriptFormatter.ToTxt(result.Document, options: result.FormattingOptions);
         const int previewLimit = 200_000;
         PreviewTextBox.Text = preview.Length <= previewLimit
             ? preview
@@ -604,6 +634,30 @@ public partial class MainWindow : Window
         path = files[0];
         return File.Exists(path) && SupportedExtensions.Contains(Path.GetExtension(path));
     }
+
+    private IReadOnlyList<string> GetSelectedLanguageCodes()
+    {
+        var languageCodes = new List<string>(2);
+        if (ChineseLanguageCheckBox.IsChecked == true)
+        {
+            languageCodes.Add("zh");
+        }
+
+        if (EnglishLanguageCheckBox.IsChecked == true)
+        {
+            languageCodes.Add("en");
+        }
+
+        return languageCodes;
+    }
+
+    private bool HasSelectedLanguage() =>
+        ChineseLanguageCheckBox.IsChecked == true || EnglishLanguageCheckBox.IsChecked == true;
+
+    private static string FormatSelectedLanguages(IReadOnlyList<string> languageCodes) =>
+        string.Join(" + ", languageCodes.Select(code => code == "zh" ? "中文" : "English"));
+
+    private static string FormatSwitch(bool enabled) => enabled ? "开" : "关";
 
     private static bool IsIndeterminateState(JobState state) => state is
         JobState.WaitingForModel or

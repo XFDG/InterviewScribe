@@ -5,9 +5,12 @@ InterviewScribe 是一个面向 Windows 10/11 x64 的本地图形界面工具，
 ## 它如何工作
 
 1. 在界面中选择一个视频或音频文件。
-2. FFmpeg 在本地提取和规范化音频；如果录屏把麦克风和系统声音分成多条音轨，会自动合并，不会只识别第一条。
-3. MOSS-Transcribe-Diarize Q8 在本地完成中英文识别、时间戳和说话人区分。
-4. 每次都同时生成 TXT（便于交给 GPT）、SRT（带时间轴）和 JSON（结构化原始结果）。
+2. 选择识别语言：默认同时选择“中文”和“English”，适合中英文混说；也可以只保留一种语言作为识别提示。
+3. FFmpeg 在本地提取和规范化音频；如果录屏把麦克风和系统声音分成多条音轨，会自动合并，不会只识别第一条。
+4. MOSS-Transcribe-Diarize Q8 在本地完成中英文识别、时间戳和说话人区分。
+5. 每次都同时生成 TXT（便于交给 GPT）、SRT（标准字幕）和 JSON（结构化原始结果）。
+
+界面中的两个导出开关用于控制可读文本：可以让 TXT 显示或隐藏时间轴，也可以让 TXT 和 SRT 显示或隐藏说话人。SRT 为保持标准字幕格式始终保留时间码；JSON 始终保留完整时间戳和说话人数据，方便以后重新导出。两个语言选项至少要选择一个；双选时使用模型原生的中英混合识别，单选时会向模型提供对应语言提示，而不是把另一种语言强行过滤掉。
 
 安装包自带 FFmpeg/FFprobe、InterviewScribe EngineHost 命令行宿主和 transcribe.cpp Windows CPU/Vulkan 原生运行库，不自带模型。第一次开始转写时，应用会从 Hugging Face 的固定 revision 下载 `MOSS-Transcribe-Diarize-Q8_0.gguf`（约 987 MB）。只有文件大小和 SHA-256 都匹配发布锁文件中的值时才会加载；之后可以断网使用。
 
@@ -35,7 +38,7 @@ InterviewScribe 是一个面向 Windows 10/11 x64 的本地图形界面工具，
 在仓库根目录执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.1.0
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.2.0
 ```
 
 脚本会：
@@ -43,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.
 1. 按锁文件下载 FFmpeg 和 transcribe.cpp，同时核对文件大小与 SHA-256。
 2. 还原 .NET 依赖、运行测试并发布 `win-x64` 自包含程序。
 3. 将已验证的原生组件和第三方声明放入发布目录。
-4. 用 Inno Setup 生成 `artifacts\release\InterviewScribe-Setup-x64.exe`。
+4. 用 Inno Setup 生成 `artifacts\release\InterviewScribe-Setup-x64.exe`，并在同一目录写入 `SHA256SUMS.txt`。
 
 只准备原生依赖：
 
@@ -58,6 +61,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -SkipInstal
 ```
 
 下载归档缓存在 `artifacts\downloads`，发布过程不会把任何模型、用户视频、临时音频或转写结果打进安装包。这些路径已由 `.gitignore` 排除。
+
+## 安装与桌面快捷方式
+
+双击安装包后，“在桌面创建快捷方式（推荐）”默认勾选，也可以在安装向导中取消。需要脚本化安装时，可显式控制这个选项：
+
+```powershell
+# 静默安装并创建桌面快捷方式
+.\InterviewScribe-Setup-x64.exe /VERYSILENT /TASKS=desktopicon
+
+# 静默安装但不创建桌面快捷方式
+.\InterviewScribe-Setup-x64.exe /VERYSILENT /MERGETASKS=!desktopicon
+```
+
+卸载应用时，安装器创建的桌面和开始菜单快捷方式会一并移除。卸载不会删除模型缓存和用户转写结果。
 
 ## 依赖可复现性
 

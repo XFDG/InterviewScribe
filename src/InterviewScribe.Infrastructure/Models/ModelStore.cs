@@ -39,7 +39,9 @@ public sealed class ModelStore : IDisposable
             Timeout = Timeout.InfiniteTimeSpan,
         };
         _retryDelay = retryDelay;
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("InterviewScribe/1.0");
+        var assemblyVersion = typeof(ModelStore).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        _httpClient.DefaultRequestHeaders.UserAgent.Add(
+            new ProductInfoHeaderValue("InterviewScribe", assemblyVersion));
     }
 
     public async Task<string> EnsureAsync(

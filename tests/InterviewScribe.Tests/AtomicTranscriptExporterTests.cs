@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using InterviewScribe.Core.Export;
 using InterviewScribe.Infrastructure.Pipeline;
 
 namespace InterviewScribe.Tests;
@@ -57,6 +59,36 @@ public sealed class AtomicTranscriptExporterTests
                 cancellation.Token));
 
         Assert.Empty(Directory.GetFiles(directory.Path));
+    }
+
+    [Fact]
+    public async Task ExportAsync_AppliesDisplayOptionsButKeepsStructuredJson()
+    {
+        using var directory = new TemporaryDirectory();
+        var options = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = false,
+            IncludeSpeakers = false
+        };
+
+        var result = await AtomicTranscriptExporter.ExportAsync(
+            TestDocumentFactory.Create(),
+            directory.Path,
+            CancellationToken.None,
+            options);
+
+        var txt = await File.ReadAllTextAsync(result.TxtPath);
+        var srt = await File.ReadAllTextAsync(result.SrtPath);
+        Assert.DoesNotContain("[00:", txt);
+        Assert.DoesNotContain("说话人", txt);
+        Assert.Contains(" --> ", srt);
+        Assert.DoesNotContain("[说话人", srt);
+
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(result.JsonPath));
+        var firstSegment = json.RootElement.GetProperty("segments")[0];
+        Assert.True(firstSegment.TryGetProperty("startMs", out _));
+        Assert.True(firstSegment.TryGetProperty("endMs", out _));
+        Assert.True(firstSegment.TryGetProperty("speakerId", out _));
     }
 
     private sealed class TemporaryDirectory : IDisposable

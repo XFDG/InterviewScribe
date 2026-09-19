@@ -309,7 +309,63 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2">
-                    <Border Style="{StaticResource CardStyle}">
+                    <Border x:Name="SettingsPanel" Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="转写设置" Style="{StaticResource SectionTitleStyle}" />
+
+                            <TextBlock Text="识别语言（可多选）"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Margin="0,17,0,0" />
+                            <StackPanel Orientation="Horizontal" Margin="0,11,0,0">
+                                <CheckBox x:Name="ChineseLanguageCheckBox"
+                                          Content="中文"
+                                          IsChecked="True"
+                                          FontSize="13"
+                                          VerticalAlignment="Center"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="EnglishLanguageCheckBox"
+                                          Content="English"
+                                          IsChecked="True"
+                                          FontSize="13"
+                                          VerticalAlignment="Center"
+                                          Margin="24,0,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                            </StackPanel>
+                            <TextBlock Text="中英都选适合混合对话；单选会给模型对应的语言提示。"
+                                       Style="{StaticResource CaptionStyle}"
+                                       TextWrapping="Wrap"
+                                       LineHeight="18"
+                                       Margin="0,8,0,0" />
+                            <TextBlock x:Name="LanguageValidationText"
+                                       Text="请至少选择一种识别语言。"
+                                       Foreground="{StaticResource DangerBrush}"
+                                       FontSize="12"
+                                       Margin="0,7,0,0"
+                                       Visibility="Collapsed" />
+
+                            <Border Height="1" Background="{StaticResource LineBrush}" Margin="0,18,0,16" />
+
+                            <TextBlock Text="文件内容" FontSize="13" FontWeight="SemiBold" />
+                            <CheckBox x:Name="IncludeTimelineCheckBox"
+                                      Content="TXT 包含时间轴"
+                                      IsChecked="True"
+                                      FontSize="13"
+                                      Margin="0,12,0,0" />
+                            <CheckBox x:Name="IncludeSpeakersCheckBox"
+                                      Content="TXT / SRT 标注说话人"
+                                      IsChecked="True"
+                                      FontSize="13"
+                                      Margin="0,11,0,0" />
+                            <TextBlock Text="SRT 会按字幕规范保留时间码；JSON 始终保留完整结构。"
+                                       Style="{StaticResource CaptionStyle}"
+                                       TextWrapping="Wrap"
+                                       LineHeight="18"
+                                       Margin="0,10,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CardStyle}" Margin="0,18,0,0">
                         <StackPanel>
                             <TextBlock Text="识别方案" Style="{StaticResource SectionTitleStyle}" />
                             <Border Background="{StaticResource PrimarySoftBrush}" CornerRadius="11" Padding="15" Margin="0,16,0,0">
@@ -372,7 +428,7 @@
                     <Border Style="{StaticResource CardStyle}" Margin="0,18,0,0">
                         <StackPanel>
                             <TextBlock Text="给 GPT 分析时" FontSize="15" FontWeight="SemiBold" />
-                            <TextBlock Text="优先发送生成的 TXT。它已经按说话人和时间段整理，适合继续做面经总结、问题复盘和回答优化。"
+                            <TextBlock Text="优先发送生成的 TXT。它会按你的选项整理，适合继续做面经总结、问题复盘和回答优化。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="20"

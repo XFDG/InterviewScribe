@@ -6,9 +6,13 @@ namespace InterviewScribe.Core.Export;
 
 public static class TranscriptFormatter
 {
-    public static string ToTxt(TranscriptDocument document, IReadOnlyDictionary<int, string>? speakerNames = null)
+    public static string ToTxt(
+        TranscriptDocument document,
+        IReadOnlyDictionary<int, string>? speakerNames = null,
+        TranscriptFormattingOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(document);
+        options ??= TranscriptFormattingOptions.Default;
         var builder = new StringBuilder();
         builder.AppendLine("# 面试录屏转写");
         builder.Append("文件：").AppendLine(document.SourceFileName);
@@ -34,13 +38,30 @@ public static class TranscriptFormatter
         builder.AppendLine();
         foreach (var segment in MergeForReading(document.Segments))
         {
-            var speaker = ResolveSpeakerName(segment.SpeakerId, speakerNames);
-            builder.Append('[')
-                .Append(FormatClock(segment.StartMs, includeMilliseconds: true))
-                .Append(" - ")
-                .Append(FormatClock(segment.EndMs, includeMilliseconds: true))
-                .Append("] ")
-                .AppendLine(speaker);
+            if (options.IncludeTimestamps)
+            {
+                builder.Append('[')
+                    .Append(FormatClock(segment.StartMs, includeMilliseconds: true))
+                    .Append(" - ")
+                    .Append(FormatClock(segment.EndMs, includeMilliseconds: true))
+                    .Append(']');
+            }
+
+            if (options.IncludeSpeakers)
+            {
+                if (options.IncludeTimestamps)
+                {
+                    builder.Append(' ');
+                }
+
+                builder.Append(ResolveSpeakerName(segment.SpeakerId, speakerNames));
+            }
+
+            if (options.IncludeTimestamps || options.IncludeSpeakers)
+            {
+                builder.AppendLine();
+            }
+
             builder.AppendLine(segment.Text.Trim());
             builder.AppendLine();
         }
@@ -48,9 +69,13 @@ public static class TranscriptFormatter
         return builder.ToString().TrimEnd() + Environment.NewLine;
     }
 
-    public static string ToSrt(TranscriptDocument document, IReadOnlyDictionary<int, string>? speakerNames = null)
+    public static string ToSrt(
+        TranscriptDocument document,
+        IReadOnlyDictionary<int, string>? speakerNames = null,
+        TranscriptFormattingOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(document);
+        options ??= TranscriptFormattingOptions.Default;
         var builder = new StringBuilder();
         var outputIndex = 0;
 
@@ -61,10 +86,14 @@ public static class TranscriptFormatter
             builder.Append(FormatSrtClock(segment.StartMs))
                 .Append(" --> ")
                 .AppendLine(FormatSrtClock(segment.EndMs));
-            builder.Append('[')
-                .Append(ResolveSpeakerName(segment.SpeakerId, speakerNames))
-                .Append("] ")
-                .AppendLine(segment.Text.Trim());
+            if (options.IncludeSpeakers)
+            {
+                builder.Append('[')
+                    .Append(ResolveSpeakerName(segment.SpeakerId, speakerNames))
+                    .Append("] ");
+            }
+
+            builder.AppendLine(segment.Text.Trim());
             builder.AppendLine();
         }
 

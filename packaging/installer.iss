@@ -1,5 +1,5 @@
 ﻿#ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.2.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\artifacts\package\InterviewScribe"
@@ -42,8 +42,13 @@ VersionInfoCompany={#MyAppPublisher}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+DesktopShortcutTask=在桌面创建快捷方式（推荐）
+DesktopShortcutGroup=快捷方式：
+
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+; 首次安装默认勾选，用户仍可在安装向导中取消。静默安装可用 /TASKS=desktopicon 显式启用。
+Name: "desktopicon"; Description: "{cm:DesktopShortcutTask}"; GroupDescription: "{cm:DesktopShortcutGroup}"; Flags: checkedonce
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

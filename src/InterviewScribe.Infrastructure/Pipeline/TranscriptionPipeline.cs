@@ -1,5 +1,6 @@
 using System.Text.Json;
 using InterviewScribe.Core.Domain;
+using InterviewScribe.Core.Export;
 using InterviewScribe.Core.Validation;
 using InterviewScribe.Infrastructure.Media;
 using InterviewScribe.Infrastructure.Models;
@@ -43,6 +44,14 @@ public sealed class TranscriptionPipeline
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var languageSelection = LanguageSelection.FromCodes(request.LanguageCodes);
+        var requestedFormattingOptions = request.FormattingOptions
+            ?? throw new ArgumentException("转写格式选项不能为空。", nameof(request));
+        var formattingOptions = new TranscriptFormattingOptions
+        {
+            IncludeTimestamps = requestedFormattingOptions.IncludeTimestamps,
+            IncludeSpeakers = requestedFormattingOptions.IncludeSpeakers,
+        };
         var sourcePath = ValidateSourcePath(request.SourcePath);
         var outputDirectory = ValidateOutputDirectory(request.OutputDirectory);
 
@@ -129,6 +138,7 @@ public sealed class TranscriptionPipeline
             {
                 engineRun = await RunEngineAsync(
                     "vulkan",
+                    languageSelection,
                     engineHostPath,
                     transcribeRuntimeDirectory,
                     modelPath,
@@ -153,6 +163,7 @@ public sealed class TranscriptionPipeline
                 {
                     engineRun = await RunEngineAsync(
                         "cpu",
+                        languageSelection,
                         engineHostPath,
                         transcribeRuntimeDirectory,
                         modelPath,
@@ -188,7 +199,8 @@ public sealed class TranscriptionPipeline
             var exported = await AtomicTranscriptExporter.ExportAsync(
                 document,
                 outputDirectory,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                formattingOptions).ConfigureAwait(false);
 
             AddLog(logMessages, $"结果已保存：{exported.TxtPath}");
             succeeded = true;
@@ -198,7 +210,10 @@ public sealed class TranscriptionPipeline
                 exported.JsonPath,
                 document,
                 logMessages.ToArray(),
-                outputDirectory);
+                outputDirectory)
+            {
+                FormattingOptions = formattingOptions,
+            };
         }
         finally
         {
@@ -215,6 +230,7 @@ public sealed class TranscriptionPipeline
 
     private async Task<EngineRunOutcome> RunEngineAsync(
         string backend,
+        LanguageSelection languageSelection,
         string engineHostPath,
         string runtimeDirectory,
         string modelPath,
@@ -237,14 +253,13 @@ public sealed class TranscriptionPipeline
             {
                 FileName = engineHostPath,
                 WorkingDirectory = Path.GetDirectoryName(engineHostPath),
-                Arguments =
-                [
-                    "--runtime", runtimeDirectory,
-                    "--model", modelPath,
-                    "--audio", wavPath,
-                    "--output", resultPath,
-                    "--backend", backend,
-                ],
+                Arguments = BuildEngineArguments(
+                    runtimeDirectory,
+                    modelPath,
+                    wavPath,
+                    resultPath,
+                    backend,
+                    languageSelection),
                 StandardOutputLogPath = Path.Combine(jobDirectory, logPrefix + ".stdout.log"),
                 StandardErrorLogPath = Path.Combine(jobDirectory, logPrefix + ".stderr.log"),
             },
@@ -276,6 +291,27 @@ public sealed class TranscriptionPipeline
         }
 
         return new EngineRunOutcome(result.Elapsed);
+    }
+
+    internal static IReadOnlyList<string> BuildEngineArguments(
+        string runtimeDirectory,
+        string modelPath,
+        string wavPath,
+        string resultPath,
+        string backend,
+        LanguageSelection languageSelection)
+    {
+        ArgumentNullException.ThrowIfNull(languageSelection);
+
+        return
+        [
+            "--runtime", runtimeDirectory,
+            "--model", modelPath,
+            "--audio", wavPath,
+            "--output", resultPath,
+            "--backend", backend,
+            "--language", languageSelection.EngineArgument,
+        ];
     }
 
     private static async Task<EngineResultDto> ReadEngineResultAsync(

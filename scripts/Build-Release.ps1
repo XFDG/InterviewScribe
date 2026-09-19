@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string] $Version = '0.1.0',
+    [string] $Version = '0.2.0',
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
     [string] $NativeRoot,
@@ -253,5 +253,12 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
 }
 
 $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksumPath = Join-Path $releaseRoot 'SHA256SUMS.txt'
+$utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText(
+    $checksumPath,
+    "$installerHash  InterviewScribe-Setup-x64.exe`n",
+    $utf8WithoutBom)
 Write-Host "安装包：$installerPath"
 Write-Host "SHA-256：$installerHash"
+Write-Host "校验文件：$checksumPath"
