@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/InterviewScribe.Core/InterviewScribe.Core.csproj" />
+  <Project Path="src/InterviewScribe.Infrastructure/InterviewScribe.Infrastructure.csproj" />
+  <Project Path="src/InterviewScribe.EngineHost/InterviewScribe.EngineHost.csproj" />
+  <Project Path="src/InterviewScribe.App/InterviewScribe.App.csproj" />
+  <Project Path="tests/InterviewScribe.Tests/InterviewScribe.Tests.csproj" />
+</Solution>

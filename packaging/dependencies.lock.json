@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "nativeDependencies": {
+    "ffmpeg": {
+      "version": "9.0.2",
+      "provider": "BtbN/FFmpeg-Builds",
+      "releaseTag": "autobuild-2026-09-19-13-11",
+      "archiveFileName": "ffmpeg-n9.0.2-win64-lgpl-9.0.zip",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-19-13-11/ffmpeg-n9.0.2-win64-lgpl-9.0.zip",
+      "fileSizeBytes": 170453658,
+      "sha256": "f0a85cd3977d987992a90d0e2a1e563d2aeb97078823a42216cdce154d8119cb",
+      "license": "LGPL-2.1-or-later",
+      "sourceUrl": "https://github.com/FFmpeg/FFmpeg/tree/n9.0.2",
+      "buildSourceUrl": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-09-19-13-11",
+      "requiredFiles": [
+        "ffmpeg.exe",
+        "ffprobe.exe",
+        "licenses/LICENSE.txt"
+      ]
+    },
+    "transcribeCpp": {
+      "version": "0.2.3",
+      "provider": "handy-computer/transcribe.cpp",
+      "releaseTag": "v0.2.3",
+      "archiveFileName": "transcribe-native-0.2.3-windows-x86_64-cpu-vulkan.tar.gz",
+      "url": "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.2.3/transcribe-native-0.2.3-windows-x86_64-cpu-vulkan.tar.gz",
+      "fileSizeBytes": 20077848,
+      "sha256": "dac5b6038aaf8777cab541b0f854a79e34f13e5892266229f64c61d34a879e49",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/handy-computer/transcribe.cpp/tree/v0.2.3",
+      "entryPoint": "transcribe.dll",
+      "requiredFiles": [
+        "contract.json",
+        "transcribe.dll",
+        "ggml.dll",
+        "ggml-base.dll",
+        "ggml-vulkan.dll",
+        "ggml-cpu-x64.dll",
+        "ggml-cpu-sse42.dll",
+        "ggml-cpu-sandybridge.dll",
+        "ggml-cpu-haswell.dll",
+        "ggml-cpu-alderlake.dll",
+        "ggml-cpu-cannonlake.dll",
+        "ggml-cpu-skylakex.dll",
+        "ggml-cpu-cascadelake.dll",
+        "ggml-cpu-icelake.dll",
+        "licenses/LICENSE",
+        "licenses/ggml/LICENSE",
+        "licenses/src/third_party/miniz/LICENSE"
+      ],
+      "backends": [
+        "vulkan",
+        "cpu"
+      ],
+      "archiveNote": "The upstream Windows CPU/Vulkan archive is a native library distribution and does not contain transcribe-cli.exe."
+    }
+  },
+  "models": {
+    "mossTranscribeDiarizeQ8": {
+      "repository": "handy-computer/moss-transcribe-diarize-gguf",
+      "revision": "bfa3d24438711391d8713c6ab0efd6264527757c",
+      "fileName": "MOSS-Transcribe-Diarize-Q8_0.gguf",
+      "url": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/resolve/bfa3d24438711391d8713c6ab0efd6264527757c/MOSS-Transcribe-Diarize-Q8_0.gguf",
+      "fileSizeBytes": 986899616,
+      "sha256": "64ec654dc6ffcfdfe180422dffce1d33422b0c30959b7edfd131bad77ee35039",
+      "license": "Apache-2.0",
+      "delivery": "first-run-download",
+      "modelCardUrl": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/tree/bfa3d24438711391d8713c6ab0efd6264527757c"
+    }
+  }
+}
