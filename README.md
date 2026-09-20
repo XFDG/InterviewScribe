@@ -1,214 +1,165 @@
-# InterviewScribe 面试转写助手
+# MediaScribe 媒体转写助手
 
-InterviewScribe v0.4.1 是一个面向 Windows 10/11 x64 的图形界面工具，用来把已有录屏、视频或音频转成便于交给 GPT 分析的文字。界面支持 11 种语言、GPU 优先推理、说话人/时间轴开关、实时全流程百分比与预计剩余时间，以及 TXT、Markdown、Word、PDF、SRT 和 JSON 多格式导出。
+MediaScribe 是一个面向 Windows 10/11 x64 的本地媒体转写 GUI。把已有录屏、会议视频或音频拖进窗口，选择语言和输出格式，程序会按队列逐个生成可直接交给 GPT、笔记工具或字幕编辑器使用的文字。
 
-## 三种识别模式
+- 完全本地识别：模型安装完成后，识别过程不上传音频、不需要联网。
+- 三种可选本地引擎：Whisper Turbo、MOSS 兼容模式、Qwen3-ASR + ForcedAligner。
+- 11 种可选语言：中文、英语、粤语、日语、韩语、法语、德语、西班牙语、葡萄牙语、俄语、意大利语；可多选并自动识别混说。
+- TXT、Markdown、DOCX、PDF、SRT、JSON 可多选导出。
+- 可选时间轴和说话人标签；说话人能力由保留的 MOSS 独立后处理提供。
+- 可一次选择多个文件，严格顺序处理，不会争抢同一块 GPU。
+- 实时显示确定型百分比、已用时间、预计剩余时间和运行诊断。
 
-| 模式 | 文字与时间轴 | 说话人 | 运行位置 | 网络要求 |
+> 名称从 InterviewScribe 更名为 MediaScribe；当前版本继续复用旧的数据目录 `%LOCALAPPDATA%\InterviewScribe`，避免升级时重复下载已有模型。
+
+## 选择识别方案
+
+| 模式 | 文字与时间轴 | 说话人 | 设备策略 | 适合什么情况 |
 | --- | --- | --- | --- | --- |
-| **MOSS 本地快速** | MOSS-Transcribe-Diarize Q8 | MOSS | 本机；Vulkan 优先，失败时自动改用 CPU | 首次下载 MOSS 权重；之后可离线 |
-| **Qwen3-ASR 1.7B 本地高精度** | Qwen3-ASR-1.7B-hf 生成文字，Qwen3-ForcedAligner-0.6B-hf 生成时间对齐 | 本地 MOSS | 本机；Qwen 自动选择 CUDA 或 CPU，MOSS 使用 Vulkan/CPU | 首次安装运行组件、MOSS 和两套 Qwen 权重；安装完成后严格离线 |
-| **Qwen 官方 SDK 云端高精度** | DashScope `qwen3-asr-flash` 生成文字，本地 VAD 分段提供时间边界 | 本地 MOSS | Qwen 文字识别在云端，说话人轨道与结果合并在本机 | 每次识别都需联网、有效 API Key，并可能产生服务费用 |
+| **Whisper Turbo 快速模式（默认推荐）** | `faster-whisper-large-v3-turbo` | 可选：再跑一次 MOSS | Windows 原生 CUDA 优先，`int8_float16`；失败时 CPU `int8` | 希望速度接近 Buzz，同时保留本地时间轴 |
+| **MOSS 本地兼容模式** | `MOSS-Transcribe-Diarize-Q8` 一次生成 | 内建 | Vulkan GPU 优先；单段失败才回退 CPU | 希望沿用已有 MOSS 工作流或直接得到说话人轨道 |
+| **Qwen3-ASR + ForcedAligner 高精度模式** | Qwen3-ASR 生成文字，ForcedAligner 生成逐词/逐 token 时间轴 | 可选：再跑一次 MOSS | 标准 PyTorch，Windows CUDA 优先；ASR 与对齐器顺序加载 | 更看重中英混说、文字质量与细粒度时间轴 |
 
-两种高精度模式都会先运行一次 MOSS，取得说话人轨道，而且都不会用 MOSS 的文字替换 Qwen 文字。本地模式用 ForcedAligner 生成逐词时间戳，再按时间重叠合入 MOSS 说话人；SDK 模式先用本地 VAD 和 MOSS 说话人边界切分音频，再由云端逐段转写，因此提供的是分段时间轴，不是云端逐词时间戳。说话人标签是模型估计的“说话人 1、说话人 2”，不是身份识别，重叠说话或音质较差时仍应人工复核。
-
-本地路径和 SDK 路径不是同一个模型的两种下载方式：本地路径运行固定 revision 的 `Qwen3-ASR-1.7B-hf`；SDK 路径调用由云服务管理的 `qwen3-asr-flash`，不需要在电脑上保存 Qwen 权重。
-
-## 识别语言
-
-界面可选中文、English、粤语、日语、韩语、法语、德语、西班牙语、葡萄牙语、俄语和意大利语。单选会给本地 Qwen 对应的语言提示；选择两种及以上或使用 SDK 路径时启用自动语言识别，而不是把模型限制在勾选集合中。
-
-当前打包的 MOSS/transcribe.cpp 端口优先保障中文和英文。需要粤语、日语、韩语或欧洲语言的稳定文字与逐词时间轴时，应选择 Qwen 本地高精度模式。
+“快速”和“高精度”是工作流定位，不是所有录音条件下的绝对基准。噪声、口音、多人抢话、术语、驱动和显卡都会影响速度及正确性；重要内容仍建议抽听核对。
 
 ## 当前工作流
 
-1. 在界面中选择视频或音频，以及输出文件夹。
-2. 选择一种或多种识别语言。本地路径单选会给模型语言提示，多选或 SDK 路径则启用自动识别。
-3. 选择识别模式和一种或多种输出格式，并决定可读结果是否显示时间轴和说话人。
-4. FFprobe 检查媒体时长和音轨；存在多条音轨时，FFmpeg 会把麦克风与系统声音合并成 16 kHz 单声道音频，原视频不会被修改。
-5. MOSS 在本机生成基础文字、时间轴和说话人轨道。快速模式直接使用这份结果；高精度模式继续运行所选 Qwen 路径，并在本机合并说话人。
-6. 程序以原子写入方式生成所选结果；成功后删除任务使用的临时 WAV。
+1. 在 GUI 中添加一个或多个视频/音频文件，选择输出文件夹、语言、模式和格式。
+2. 程序用 FFprobe 读取媒体，用 FFmpeg 合并音轨并提取为 16 kHz、单声道 PCM WAV；原文件不会被修改或删除。
+3. 队列从上到下逐个处理。Whisper 与 Qwen 默认只做文字和时间轴；勾选“说话人区分”后，才额外运行 MOSS 并按时间重叠合入说话人标签。
+4. Qwen 模式会先释放 ASR 与 CUDA 缓存，再加载 ForcedAligner，避免两套大模型同时占用显存。
+5. 所有选中的格式先写入临时文件，全部成功后原子提交；取消或失败不会留下半成品。可重建的 WAV、分段音频和中间 JSON 会清理，原始媒体始终保留。
 
-当前版本单个文件最长支持 2 小时。更长的录屏请先分段，以免一次性处理占用过多内存和临时磁盘空间。
+单个媒体文件目前上限为 8 小时。使用 MOSS 的长录音会自动拆成最长 25 分钟、相邻 30 秒重叠的窗口，合并全局时间轴和说话人标签；其他模式也会按显存配置把 Qwen 音频切为保守的小段。
 
-## 安装模型与运行组件
+## 显卡自适应，而非只为 RTX 5060 编写
 
-安装包包含 FFmpeg/FFprobe、InterviewScribe EngineHost、transcribe.cpp Windows CPU/Vulkan 运行库和 Qwen 辅助程序，但**不包含任何模型权重**。
+启动识别时，程序尝试用 `nvidia-smi` 读取主 NVIDIA GPU 的显存。它据此保守设置 MOSS 上下文、Qwen 分段和 Whisper 批量大小；无法检测显存时使用更小的安全默认值。不会因为某一个显卡型号写死 token 上限。
 
-### MOSS 本地快速
+| 可用显存（MiB） | MOSS 上下文上限 | Qwen 单段 | Whisper 批量 |
+| --- | ---: | ---: | ---: |
+| 未检测到 | 12,288 token | 60 秒 | 2 |
+| < 4,096 | 8,192 token | 45 秒 | 1 |
+| 4,096–6,143 | 12,288 token | 60 秒 | 2 |
+| 6,144–8,191 | 16,384 token | 75 秒 | 3 |
+| 8,192–16,383 | 20,480–32,768 token | 90–150 秒 | 4–6 |
+| ≥ 16,384 | 49,152–65,536 token | 最多 180 秒 | 8–12 |
 
-第一次开始识别时，应用会从 Hugging Face 的固定 revision 下载 `MOSS-Transcribe-Diarize-Q8_0.gguf`（约 987 MB）。程序会核对锁文件记录的字节数和 SHA-256；校验成功后保存在：
+这是为桌面合成、驱动和模型工作区预留余量的策略，不把理论显存全部压满。可通过 `MEDIASCRIBE_GPU_MEMORY_MIB` 为诊断或特殊硬件临时覆盖检测值。
+
+## 安装包与桌面快捷方式
+
+下载 `MediaScribe-Setup-x64.exe` 后双击安装。向导默认勾选“在桌面创建快捷方式（推荐）”；也可以在静默安装时显式控制：
+
+```powershell
+# 安装并创建桌面快捷方式
+.\MediaScribe-Setup-x64.exe /VERYSILENT /TASKS=desktopicon
+
+# 安装但不创建桌面快捷方式
+.\MediaScribe-Setup-x64.exe /VERYSILENT /MERGETASKS=!desktopicon
+```
+
+应用、安装器、开始菜单和桌面快捷方式使用同一枚 MediaScribe 霓虹波形图标。
+
+## 首次安装模型
+
+安装包包含 GUI、FFmpeg/FFprobe、MOSS 原生运行库和模型安装脚本，**不包含模型权重**。首次准备每一种模型时需联网；通过校验后，日常转写可完全离线。
+
+### Whisper Turbo 快速模式
+
+在 GUI 选择“Whisper Turbo 快速模式”，点击“安装快速模式组件…”。安装器会创建应用隔离的 Python 环境，安装 Faster-Whisper/CTranslate2 及其 Windows CUDA 12 依赖，并下载固定 revision 的 CTranslate2 `large-v3-turbo` 模型。
+
+默认位置：
+
+```text
+%LOCALAPPDATA%\InterviewScribe\whisper-runtime\.venv
+%LOCALAPPDATA%\InterviewScribe\models\Whisper-large-v3-turbo-ct2
+```
+
+该模型由 Hugging Face 快照安装器下载、按固定 revision、文件长度和 SHA-256 校验。若你的网络无法访问 Hugging Face，需要先让该下载阶段具备可访问的网络；完成后不再依赖网络或 Hugging Face Token。
+
+也可从安装目录手动运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\whisper\Install-FasterWhisperRuntime.ps1
+```
+
+### Qwen3-ASR + ForcedAligner 高精度模式（ModelScope）
+
+在 GUI 选择“Qwen3-ASR + ForcedAligner 高精度”，点击“安装高精度组件…”。需要 64 位 CPython 3.11 或 3.12；安装器建立独立虚拟环境，安装锁定的标准 PyTorch CUDA/CPU 运行时、`qwen-asr` 和 `modelscope`，再从官方 ModelScope 仓库下载并逐文件校验：
+
+- `Qwen/Qwen3-ASR-1.7B`
+- `Qwen/Qwen3-ForcedAligner-0.6B`
+
+默认位置：
+
+```text
+%LOCALAPPDATA%\InterviewScribe\qwen-runtime\.venv
+%LOCALAPPDATA%\InterviewScribe\ModelScope-Qwen3\Qwen3-ASR-1.7B
+%LOCALAPPDATA%\InterviewScribe\ModelScope-Qwen3\Qwen3-ForcedAligner-0.6B
+```
+
+这条路径不需要 Hugging Face 权限或 Token。ModelScope 公共仓库能否直连取决于你当地网络；若先用官方 `modelscope download` 下载到上述目录，安装器会校验并接管完全匹配的本地快照，而不是重复下载。安装完成后，Qwen sidecar 同时设置离线环境变量和 `local_files_only=True`，权重不完整时会明确报错，绝不静默联网。
+
+```powershell
+# 自动优先选择 NVIDIA CUDA；没有 NVIDIA 时安装 CPU 运行时
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRuntime.ps1
+
+# 强制安装 CPU 版本
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRuntime.ps1 -TorchBackend Cpu
+```
+
+高精度安装器不再预下载 MOSS；只有你实际勾选“说话人区分”或选择 MOSS 模式时，MOSS 才会单独准备，避免无故下载额外模型或把 ModelScope 安装绑到 Hugging Face。
+
+### MOSS 本地兼容模式
+
+首次使用 MOSS 时会从其锁定的 Hugging Face revision 下载 `MOSS-Transcribe-Diarize-Q8_0.gguf`（约 987 MB），并验证长度和 SHA-256：
 
 ```text
 %LOCALAPPDATA%\InterviewScribe\models\MOSS-Transcribe-Diarize-Q8_0.gguf
 ```
 
-以后选择 MOSS 本地快速模式时可以断网运行。
+之后 MOSS、Whisper 和 Qwen 都能在没有网络的情况下运行。卸载应用不会自动删除模型、运行环境、失败任务诊断或用户输出，以免误删数 GB 数据。
 
-### Qwen3-ASR 1.7B 本地高精度
+## 输出与隐私
 
-选择该模式后，点击界面里的“安装高精度组件…”。电脑需要先安装 64 位 Python 3.11 或 3.12；打开的 PowerShell 窗口会自动识别 Python 官方安装和 `uv` 注册的解释器，基于它准备独立的 Python 虚拟环境，并下载、校验程序锁定的 MOSS 说话人模型及两套 Qwen 权重：
+| 格式 | 用途 |
+| --- | --- |
+| TXT | 直接交给 GPT、搜索或人工整理 |
+| Markdown | 适合笔记和 GitHub 阅读 |
+| DOCX | 可编辑 Word 文档 |
+| PDF | 便于分享和归档的 A4 文档 |
+| SRT | 字幕时间码；可选显示说话人 |
+| JSON | 模型、后端、完整分段、时间戳、说话人和警告的结构化结果 |
 
-- `Qwen/Qwen3-ASR-1.7B-hf`
-- `Qwen/Qwen3-ForcedAligner-0.6B-hf`
+时间轴与说话人开关会应用于 TXT、Markdown、DOCX 和 PDF；JSON 始终保留完整结构。应用不会自动把 TXT 上传给 GPT：如需 AI 分析，请在转写完成后由你自行选择和粘贴，并先检查个人信息、公司机密等敏感内容。
 
-默认位置为：
+## 构建源码
+
+要求：Windows 10/11 x64、.NET 10 SDK、PowerShell 5.1 或 7。要生成安装包，还需 Inno Setup 6：
+
+```powershell
+winget install --id JRSoftware.InnoSetup -e
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.0
+```
+
+发布脚本会校验原生依赖与模型描述、运行 C# 和两套 Python sidecar 测试、生成 `win-x64` 自包含 GUI、拷贝 Qwen 与 Whisper 安装脚本，并输出：
 
 ```text
-%LOCALAPPDATA%\InterviewScribe\qwen-runtime\.venv
-%LOCALAPPDATA%\InterviewScribe\models\Qwen3-ASR-1.7B-hf
-%LOCALAPPDATA%\InterviewScribe\models\Qwen3-ForcedAligner-0.6B-hf
+artifacts\release\MediaScribe-Setup-x64.exe
+artifacts\release\SHA256SUMS.txt
 ```
 
-安装器会校验 MOSS 的文件长度和 SHA-256，并校验两套 Qwen 模型的完整分片与 revision 标记。通过全部校验后，本地高精度识别会设置 Hugging Face/Transformers 离线环境，只从本地目录加载，不会静默回退到网络。
-
-也可以在程序目录手动运行同一安装脚本：
+只生成可便携目录、跳过 Inno Setup：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRuntime.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.0 -SkipInstaller
 ```
 
-安装脚本默认自动检测 NVIDIA 显卡：检测到时安装锁定的 CUDA 版 PyTorch，否则安装 CPU 版。也可以手动指定 CPU：
+## 开源与许可证
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRuntime.ps1 -TorchBackend Cpu
-```
+MediaScribe 自身代码采用 [MIT License](LICENSE)。模型、FFmpeg、transcribe.cpp、Faster-Whisper/CTranslate2、PyTorch、Qwen 和 ModelScope 仍各自受上游许可证约束，详见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 与 [依赖锁文件](packaging/dependencies.lock.json)。
 
-### Qwen 官方 SDK 云端高精度
+关联上游： [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR)、[ModelScope](https://www.modelscope.cn/)、[Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)、[CTranslate2](https://opennmt.net/CTranslate2/)。
 
-选择该模式后，先点击“安装 SDK 运行组件…”。此入口安装 SDK 所需的 Python 环境和本地 MOSS 说话人模型，但不下载 Qwen 本地权重。也可以手动执行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRuntime.ps1 -SkipLocalModels
-```
-
-随后在界面的密码框中输入 DashScope API Key，或事先设置 Windows 用户环境变量：
-
-```powershell
-[Environment]::SetEnvironmentVariable('DASHSCOPE_API_KEY', '你的_API_Key', 'User')
-```
-
-重新打开应用后环境变量才会生效。界面输入的 Key 只在当前运行内存和 Qwen 子进程环境中使用，不写入应用设置或日志。
-
-DashScope SDK 默认连接中国内地（北京）区域，API Key 也必须与区域匹配。若你的百炼工作空间在其他区域，请同时配置该区域和工作空间 ID；例如新加坡区域：
-
-```powershell
-[Environment]::SetEnvironmentVariable('DASHSCOPE_API_REGION', 'ap-southeast-1', 'User')
-[Environment]::SetEnvironmentVariable('DASHSCOPE_WORKSPACE_ID', '你的_WorkspaceId', 'User')
-```
-
-设置后重新打开应用。区域可用性、模型权限和计费以阿里云 Model Studio 控制台为准。
-
-## 离线与隐私边界
-
-- **MOSS 本地快速**：模型准备完成后，视频、提取音频和转写都留在本机。
-- **Qwen 本地高精度**：MOSS、Qwen ASR 和强制对齐都在本机执行；模型准备完成后可断网运行。
-- **Qwen 官方 SDK**：原视频仍留在本机，但提取出的音频片段会发送给 DashScope。云端数据处理、留存和计费以服务方条款为准。
-- 无论选择哪种模式，应用都不会自动把最终 TXT 发给 GPT。手动提交前请检查并删除姓名、电话和公司机密等敏感信息。
-- 卸载程序不会删除 `%LOCALAPPDATA%\InterviewScribe` 下的模型、运行环境、失败任务日志，也不会删除用户选择的输出目录；如需彻底清理，应在卸载后手动删除这些内容。
-
-## 输出格式
-
-每个任务可以多选以下格式，同一次导出使用相同的文件名主体：
-
-- **TXT**：为阅读和交给 GPT 分析准备；可选择显示/隐藏时间轴和说话人。
-- **Markdown (MD)**：使用标题和段落结构，方便在笔记工具或 GitHub 中阅读。
-- **Word (DOCX)**：标准 Office Open XML 文档，转写文字、时间轴和说话人会按当前选项写入。
-- **PDF**：生成 A4 分页文档，并嵌入实际用到的 Unicode 字形子集，便于换机阅读。
-- **SRT**：标准字幕格式，始终保留时间码；可选择显示/隐藏说话人。
-- **JSON**：保留模型、后端、完整分段、时间戳、说话人和警告等结构化数据，不受两个可读输出开关影响。
-
-如果目标文件名已存在，程序会选择新的名称，不会覆盖已有结果。多格式导出会先生成全部临时文件；任一格式失败或任务取消时，本次导出不会留下半成品。
-
-PDF 会优先使用 Windows 的 Microsoft YaHei UI（微软雅黑 UI）中文字体，也支持 Noto Sans SC、黑体、等线等备选字体。日文和韩文 PDF 会分别使用可用的 CJK 字体和 Malgun Gothic 等字体回退。如果精简的 Windows 缺少必要字体，程序会明确拒绝 PDF 导出并回滚整组文件，而不是生成乱码。
-
-## 进度与运行诊断
-
-界面显示单调不回退的全流程百分比、已用时间和预计剩余时间。模型下载、音频提取和 Qwen 分段会使用实际子任务进度；MOSS 核心推理在无法得到更细粒度样本时会保持当前百分比并显示“正在估算”，不用虚假动画冒充实际进度。
-
-运行记录会实时显示当前百分比、ETA、阶段、实际使用的 CUDA/Vulkan/CPU 后端及自动回退信息。
-
-## 性能与准确性说明
-
-“本地快速”和“高精度”是产品中的工作模式，不是对所有录音都成立的基准结论。MOSS 快速模式只做一次本地模型推理；两种高精度模式会额外运行 Qwen，并继续使用 MOSS 生成说话人轨道，因此通常需要更多时间或资源。实际效果受口音、噪声、多人抢话、录音码率、显卡和驱动影响。
-
-截至 v0.4.1，本次开发所用笔记本尚未完成本地 Qwen 权重的端到端实跑，因此仓库不提供未经实测的准确率、实时倍速或显存占用数字。发布前后的判断应以同一批真实面试录屏对三种模式进行对照，并人工核对关键姓名、公司名、技术术语、数字、说话人和时间轴。
-
-## 使用条件
-
-- Windows 10 1809 或更新版本，64 位。
-- 使用任一 Qwen 模式前，需要安装 64 位 Python 3.11 或 3.12；安装按钮会识别 Python 官方安装及 `uv` 注册的解释器，创建应用专用虚拟环境，不会替换系统 Python。本版本不会误用尚未验证的 Python 3.13/3.14。
-- 建议至少 16 GB 内存，并为本地 Qwen 权重、Python 环境和长录屏临时文件预留足够磁盘空间。
-- MOSS 推荐使用支持 Vulkan 的 NVIDIA、AMD 或 Intel 显卡及较新驱动；Vulkan 推理失败时会自动用 CPU 重试。
-- MOSS 会将超过 25 分钟的音频拆成最多 25 分钟的窗口，边界保留 30 秒重叠区；程序逐段使用 32,768-token Vulkan 显存保护，合并时恢复全局时间轴、边界去重并按重叠区映射说话人。如果某段无法完整输出，只会将该段改用 CPU 完整上下文重试，不会静默截断。分段 WAV 是可重建的临时文件，会在使用后删除；原视频始终保留。
-- 本地 Qwen 会优先使用可用的 CUDA GPU；没有可用 CUDA 时可以使用 CPU，但处理长录屏可能很慢。
-- 首次准备本地模型，或每次使用 SDK 模式时，需要相应的网络连接。
-
-## 安装与桌面快捷方式
-
-双击安装包后，“在桌面创建快捷方式（推荐）”默认勾选，也可以在安装向导中取消。v0.4.1 已为 EXE、安装包、开始菜单和桌面快捷方式统一嵌入 InterviewScribe 图标。脚本化安装时可以显式控制：
-
-```powershell
-# 静默安装并创建桌面快捷方式
-.\InterviewScribe-Setup-x64.exe /VERYSILENT /TASKS=desktopicon
-
-# 静默安装但不创建桌面快捷方式
-.\InterviewScribe-Setup-x64.exe /VERYSILENT /MERGETASKS=!desktopicon
-```
-
-卸载应用时，安装器创建的桌面和开始菜单快捷方式会一并移除。
-
-## 从源码构建
-
-需要：
-
-- Windows 10/11 x64
-- .NET 10 SDK x64
-- PowerShell 5.1 或 PowerShell 7
-- 如需生成安装包，安装 Inno Setup 6：`winget install --id JRSoftware.InnoSetup -e`
-
-在仓库根目录执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.4.1
-```
-
-脚本会：
-
-1. 按锁文件下载并校验 FFmpeg 和 transcribe.cpp 原生依赖。
-2. 检查 Qwen 辅助脚本是否完整，但不会把 Qwen 权重下载进安装包。
-3. 还原 .NET 依赖、运行测试，并发布 `win-x64` 自包含的 GUI 与隔离 EngineHost。
-4. 打包原生组件、Qwen 安装/推理脚本、依赖锁文件和第三方声明。
-5. 用 Inno Setup 生成 `artifacts\release\InterviewScribe-Setup-x64.exe`，并在同一目录写入 `SHA256SUMS.txt`。
-
-只准备原生依赖：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Fetch-NativeDependencies.ps1
-```
-
-只生成可便携运行目录，不调用 Inno Setup：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -SkipInstaller
-```
-
-下载归档缓存在 `artifacts\downloads`。发布过程不会把模型、用户视频、临时音频或转写结果打进安装包；这些路径由 `.gitignore` 排除。
-
-## 依赖可复现性
-
-`packaging/dependencies.lock.json`（安装后位于程序目录的 `dependencies.lock.json`）记录原生依赖与模型版本。FFmpeg、transcribe.cpp 归档和 MOSS GGUF 使用固定 URL/commit，并校验字节数和 SHA-256；两套 Qwen 模型使用完整 Hugging Face commit revision，安装后还会校验 InterviewScribe 写入的 revision 标记。升级依赖时必须同时审查许可证、更新锁文件与模型描述，并在干净环境重新验证。
-
-请同时阅读 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
-
-## 开发注意
-
-transcribe.cpp v0.2.3 官方 Windows CPU/Vulkan 发布包只提供 `transcribe.dll`、`ggml-vulkan.dll`、CPU 后端及其依赖，不包含 `transcribe-cli.exe`。InterviewScribe 自己构建并打包 `InterviewScribe.EngineHost.exe`，由它通过原生 API 调用已锁定的 `transcribe.dll`；独立进程也可在原生库异常时保护 GUI 主进程。
-
-本地 Qwen 由打包的 `qwen_sidecar.py` 在独立 Python 进程中运行。ASR 完成后先释放模型和 CUDA 缓存，再加载强制对齐模型，以降低两套模型同时驻留带来的显存压力；这仍不代表所有显卡都已通过实测。
-
-## 许可与发布
-
-InterviewScribe 自身代码采用 [MIT License](LICENSE)。第三方软件仍分别受各自许可证约束，具体归属见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
-
-开发构建默认没有代码签名。未配置可信 Windows 代码签名证书时，安装包可能显示“未知发布者”；这不影响本地运行，但公开分发前应配置签名。
+安装包默认未进行商业代码签名，Windows 可能显示“未知发布者”；公开分发前建议配置可信代码签名证书。

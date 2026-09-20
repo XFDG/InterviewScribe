@@ -6,7 +6,7 @@
         Height="790"
         MinWidth="940"
         MinHeight="680"
-        Icon="/Assets/interviewscribe-icon.png"
+        Icon="/Assets/MediaScribe.png"
         WindowStartupLocation="CenterScreen"
         AllowDrop="True"
         Loaded="Window_Loaded"
@@ -81,7 +81,7 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <Border Width="42" Height="42" CornerRadius="11" Background="#FFFFFF" Margin="0,0,14,0" ClipToBounds="True">
-                        <Image Source="/Assets/interviewscribe-icon.png"
+                        <Image Source="/Assets/MediaScribe.png"
                                Stretch="Uniform"
                                Margin="2" />
                     </Border>
@@ -442,7 +442,7 @@
                                           Margin="0,9,0,0"
                                           Click="LanguageCheckBox_Click" />
                             </UniformGrid>
-                            <TextBlock Text="单选会给本地模型语言提示；多选或 SDK 路径使用自动识别。MOSS 快速模式优先保障中英文；扩展语言请用 Qwen 高精度模式。"
+                            <TextBlock Text="单选会给本地模型语言提示；多选会启用自动识别。Whisper Turbo 覆盖广泛语言；需要更细的中文英文时间轴可选择 Qwen 高精度。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="18"
@@ -510,11 +510,11 @@
                                       FontSize="13"
                                       Margin="0,12,0,0" />
                             <CheckBox x:Name="IncludeSpeakersCheckBox"
-                                      Content="可读文档 / SRT 标注说话人"
-                                      IsChecked="True"
+                                      Content="说话人区分（额外运行本地 MOSS）"
+                                      IsChecked="False"
                                       FontSize="13"
                                       Margin="0,11,0,0" />
-                            <TextBlock Text="时间轴与说话人选项会同时应用于 TXT、Markdown、Word 和 PDF；SRT 只受说话人开关影响。"
+                            <TextBlock Text="默认关闭以保持快速模式接近 Buzz 的速度。勾选后会额外运行保留的本地 MOSS，并把说话人标签合入结果；时间轴不受影响。两个选项会同时应用于 TXT、Markdown、Word 和 PDF；SRT 只受说话人开关影响。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="18"
@@ -526,15 +526,51 @@
                         <StackPanel>
                             <TextBlock Text="识别方案" Style="{StaticResource SectionTitleStyle}" />
 
-                            <RadioButton x:Name="MossLocalModeRadioButton"
+                            <RadioButton x:Name="WhisperTurboModeRadioButton"
                                          GroupName="TranscriptionMode"
                                          IsChecked="True"
                                          Checked="TranscriptionMode_Checked"
                                          Margin="0,16,0,0"
                                          Cursor="Hand">
                                 <StackPanel>
-                                    <TextBlock Text="MOSS 本地快速" FontSize="14" FontWeight="SemiBold" />
-                                    <TextBlock Text="Q8_0 · 断网可用 · 速度优先"
+                                    <TextBlock Text="Whisper Turbo 快速模式（推荐）" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="Whisper large-v3-turbo · Faster-Whisper · Windows CUDA 优先 · 断网可用"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,0" />
+                                </StackPanel>
+                            </RadioButton>
+
+                            <Border x:Name="WhisperSetupPanel"
+                                    Visibility="Visible"
+                                    Background="#F8F8FF"
+                                    BorderBrush="#DDE0FA"
+                                    BorderThickness="1"
+                                    CornerRadius="9"
+                                    Padding="12"
+                                    Margin="0,12,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="首次使用需下载 Whisper large-v3-turbo 权重与 Faster-Whisper 运行组件。安装后完全离线；程序会优先使用 Windows 原生 CUDA，失败时自动回退 CPU。"
+                                               Style="{StaticResource CaptionStyle}"
+                                               TextWrapping="Wrap"
+                                               LineHeight="18" />
+                                    <Button x:Name="InstallWhisperRuntimeButton"
+                                            Content="安装快速模式组件…"
+                                            Style="{StaticResource TinyButtonStyle}"
+                                            HorizontalAlignment="Left"
+                                            Margin="0,10,0,0"
+                                            Click="InstallWhisperRuntime_Click" />
+                                </StackPanel>
+                            </Border>
+
+                            <RadioButton x:Name="MossLocalModeRadioButton"
+                                         GroupName="TranscriptionMode"
+                                         Checked="TranscriptionMode_Checked"
+                                         Margin="0,15,0,0"
+                                         Cursor="Hand">
+                                <StackPanel>
+                                    <TextBlock Text="MOSS 本地兼容模式" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="文字、时间轴和说话人一次完成 · Vulkan 优先 · 适合保留现有工作流"
                                                Style="{StaticResource CaptionStyle}"
                                                TextWrapping="Wrap"
                                                Margin="0,4,0,0" />
@@ -547,8 +583,8 @@
                                          Margin="0,15,0,0"
                                          Cursor="Hand">
                                 <StackPanel>
-                                    <TextBlock Text="Qwen3-ASR 1.7B 本地高精度" FontSize="14" FontWeight="SemiBold" />
-                                    <TextBlock Text="本地权重 · GPU 优先 · 文字准确度优先"
+                                    <TextBlock Text="Qwen3-ASR + ForcedAligner 高精度" FontSize="14" FontWeight="SemiBold" />
+                                    <TextBlock Text="官方 ModelScope 权重 · 标准 PyTorch · Windows CUDA 优先 · 逐词时间轴"
                                                Style="{StaticResource CaptionStyle}"
                                                TextWrapping="Wrap"
                                                Margin="0,4,0,0" />
@@ -564,7 +600,7 @@
                                     Padding="12"
                                     Margin="0,12,0,0">
                                 <StackPanel>
-                                    <TextBlock Text="首次使用需安装 Python 运行环境、MOSS 说话人模型、Qwen3-ASR 1.7B 和强制对齐模型。"
+                                    <TextBlock Text="首次使用通过官方 ModelScope 下载 Qwen3-ASR 1.7B 与 ForcedAligner。模型和标准 PyTorch CUDA 运行环境均保存在本机；安装后可断网运行。"
                                                Style="{StaticResource CaptionStyle}"
                                                TextWrapping="Wrap"
                                                LineHeight="18" />
@@ -577,58 +613,16 @@
                                 </StackPanel>
                             </Border>
 
-                            <RadioButton x:Name="QwenSdkModeRadioButton"
-                                         GroupName="TranscriptionMode"
-                                         Checked="TranscriptionMode_Checked"
-                                         Margin="0,15,0,0"
-                                         Cursor="Hand">
-                                <StackPanel>
-                                    <TextBlock Text="Qwen 官方 SDK 云端高精度" FontSize="14" FontWeight="SemiBold" />
-                                    <TextBlock Text="无需本地 Qwen 权重 · 需网络 · 可能产生 API 费用"
-                                               Style="{StaticResource CaptionStyle}"
-                                               TextWrapping="Wrap"
-                                               Margin="0,4,0,0" />
-                                </StackPanel>
-                            </RadioButton>
-
-                            <Border x:Name="QwenSdkSettingsPanel"
-                                    Visibility="Collapsed"
-                                    Background="#FFF9ED"
-                                    BorderBrush="#F2D59C"
-                                    BorderThickness="1"
-                                    CornerRadius="9"
-                                    Padding="12"
-                                    Margin="0,12,0,0">
-                                <StackPanel>
-                                    <TextBlock Text="DashScope API Key（可留空）" FontSize="12" FontWeight="SemiBold" />
-                                    <PasswordBox x:Name="SdkApiKeyPasswordBox"
-                                                 Margin="0,7,0,0"
-                                                 Padding="9,7"
-                                                 FontSize="13"
-                                                 ToolTip="仅在本次运行的内存中使用，不会写入日志或设置文件" />
-                                    <TextBlock Text="留空时使用系统环境变量 DASHSCOPE_API_KEY。默认北京区域；其他区域还需配置 DASHSCOPE_API_REGION 和 DASHSCOPE_WORKSPACE_ID。密钥不会保存或写入运行记录。"
-                                               Style="{StaticResource CaptionStyle}"
-                                               TextWrapping="Wrap"
-                                               LineHeight="18"
-                                               Margin="0,7,0,0" />
-                                    <Button x:Name="InstallQwenSdkRuntimeButton"
-                                            Content="安装 SDK 运行组件…"
-                                            Style="{StaticResource TinyButtonStyle}"
-                                            HorizontalAlignment="Left"
-                                            Margin="0,10,0,0"
-                                            Click="InstallQwenSdkRuntime_Click" />
-                                </StackPanel>
-                            </Border>
 
                             <Border Background="{StaticResource PrimarySoftBrush}" CornerRadius="11" Padding="15" Margin="0,16,0,0">
                                 <StackPanel>
                                     <TextBlock x:Name="RecognitionSummaryTitleText"
-                                               Text="MOSS-Transcribe-Diarize"
+                                               Text="Whisper Turbo + Faster-Whisper"
                                                FontSize="14"
                                                FontWeight="SemiBold"
                                                Foreground="#4145C9" />
                                     <TextBlock x:Name="RecognitionSummaryDetailText"
-                                               Text="文字、时间轴和说话人均在本地生成。"
+                                               Text="文字与时间轴由 Whisper Turbo 生成；说话人区分可按需交给本地 MOSS。"
                                                Style="{StaticResource CaptionStyle}"
                                                TextWrapping="Wrap"
                                                LineHeight="18"

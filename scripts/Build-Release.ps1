@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string] $Version = '0.4.1',
+    [string] $Version = '0.5.0',
     [ValidateSet('Release', 'Debug')]
     [string] $Configuration = 'Release',
     [string] $NativeRoot,
@@ -24,18 +24,25 @@ if ([string]::IsNullOrWhiteSpace($NativeRoot)) {
     $NativeRoot = Join-Path $repositoryRoot 'artifacts\native'
 }
 $NativeRoot = [System.IO.Path]::GetFullPath($NativeRoot)
-$publishRoot = Join-Path $repositoryRoot 'artifacts\publish\InterviewScribe'
+$publishRoot = Join-Path $repositoryRoot 'artifacts\publish\MediaScribe'
 $enginePublishRoot = Join-Path $repositoryRoot 'artifacts\publish\InterviewScribe.EngineHost'
-$packageRoot = Join-Path $repositoryRoot 'artifacts\package\InterviewScribe'
+$packageRoot = Join-Path $repositoryRoot 'artifacts\package\MediaScribe'
 $releaseRoot = Join-Path $repositoryRoot 'artifacts\release'
 $installerScript = Join-Path $repositoryRoot 'packaging\installer.iss'
 $lockFile = Join-Path $repositoryRoot 'packaging\dependencies.lock.json'
 $qwenToolSourceRoot = Join-Path $repositoryRoot 'tools\qwen'
+$whisperToolSourceRoot = Join-Path $repositoryRoot 'tools\whisper'
 $qwenManifestFile = Join-Path $repositoryRoot 'src\InterviewScribe.Infrastructure\QwenModelManifest.cs'
+$whisperManifestFile = Join-Path $repositoryRoot 'src\InterviewScribe.Infrastructure\FasterWhisperModelManifest.cs'
 $qwenSidecarFile = Join-Path $qwenToolSourceRoot 'qwen_sidecar.py'
+$whisperSidecarFile = Join-Path $whisperToolSourceRoot 'whisper_sidecar.py'
 $qwenToolRequiredFiles = @(
     'qwen_sidecar.py',
     'Install-QwenRuntime.ps1'
+)
+$whisperToolRequiredFiles = @(
+    'whisper_sidecar.py',
+    'Install-FasterWhisperRuntime.ps1'
 )
 
 function Assert-RequiredPayloadFiles {
@@ -108,6 +115,7 @@ if (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
 }
 $dependencyLock = Get-Content -LiteralPath $lockFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $qwenManifestSource = Get-Content -LiteralPath $qwenManifestFile -Raw -Encoding UTF8
+$whisperManifestSource = Get-Content -LiteralPath $whisperManifestFile -Raw -Encoding UTF8
 $qwenSidecarSource = Get-Content -LiteralPath $qwenSidecarFile -Raw -Encoding UTF8
 $lockedAsrRevision = [string]$dependencyLock.models.qwen3Asr17bModelScope.revision
 $lockedAlignerRevision = [string]$dependencyLock.models.qwen3ForcedAligner06bModelScope.revision
@@ -134,6 +142,45 @@ if ($asrRevisionSet.Count -ne 1 -or $alignerRevisionSet.Count -ne 1) {
     throw '依赖锁、C# 运行时与 Python sidecar 中的 ModelScope Qwen 模型版本不一致。'
 }
 
+$lockedWhisperRevision = [string]$dependencyLock.models.fasterWhisperLargeV3Turbo.revision
+$lockedWhisperRepository = [string]$dependencyLock.models.fasterWhisperLargeV3Turbo.repository
+$lockedWhisperFileName = [string]$dependencyLock.models.fasterWhisperLargeV3Turbo.fileName
+$lockedWhisperBytes = [long]$dependencyLock.models.fasterWhisperLargeV3Turbo.fileSizeBytes
+$lockedWhisperSha256 = [string]$dependencyLock.models.fasterWhisperLargeV3Turbo.sha256
+$manifestWhisperRevision = Get-RequiredRegexCapture `
+    -Source $whisperManifestSource `
+    -Pattern 'internal\s+const\s+string\s+Revision\s*=\s*"([0-9a-f]{40})"' `
+    -Name 'FasterWhisperModelManifest.cs'
+$manifestWhisperRepository = Get-RequiredRegexCapture `
+    -Source $whisperManifestSource `
+    -Pattern 'internal\s+const\s+string\s+Repository\s*=\s*"([^"]+)"' `
+    -Name 'FasterWhisperModelManifest.cs'
+$manifestWhisperFileName = Get-RequiredRegexCapture `
+    -Source $whisperManifestSource `
+    -Pattern 'internal\s+const\s+string\s+ModelFileName\s*=\s*"([^"]+)"' `
+    -Name 'FasterWhisperModelManifest.cs'
+$manifestWhisperSha256 = Get-RequiredRegexCapture `
+    -Source $whisperManifestSource `
+    -Pattern 'internal\s+const\s+string\s+ModelFileSha256\s*=\s*"([0-9a-f]{64})"' `
+    -Name 'FasterWhisperModelManifest.cs'
+$manifestWhisperBytesText = Get-RequiredRegexCapture `
+    -Source $whisperManifestSource `
+    -Pattern 'internal\s+const\s+long\s+ModelFileSizeBytes\s*=\s*([0-9_]+)' `
+    -Name 'FasterWhisperModelManifest.cs'
+$manifestWhisperBytes = [long]($manifestWhisperBytesText -replace '_', '')
+if ($lockedWhisperRevision -notmatch '^[0-9a-f]{40}$' -or
+    $lockedWhisperSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+    [string]::IsNullOrWhiteSpace($lockedWhisperRepository) -or
+    [string]::IsNullOrWhiteSpace($lockedWhisperFileName) -or
+    $lockedWhisperBytes -le 0 -or
+    $lockedWhisperRevision -ne $manifestWhisperRevision -or
+    $lockedWhisperRepository -ne $manifestWhisperRepository -or
+    $lockedWhisperFileName -ne $manifestWhisperFileName -or
+    $lockedWhisperBytes -ne $manifestWhisperBytes -or
+    $lockedWhisperSha256 -ne $manifestWhisperSha256) {
+    throw '依赖锁与 Faster-Whisper C# 运行时模型描述不一致。'
+}
+
 $ffmpegRequiredFiles = @($dependencyLock.nativeDependencies.ffmpeg.requiredFiles)
 $transcribeRequiredFiles = @($dependencyLock.nativeDependencies.transcribeCpp.requiredFiles)
 Assert-RequiredPayloadFiles `
@@ -148,6 +195,10 @@ Assert-RequiredPayloadFiles `
     -Root $qwenToolSourceRoot `
     -RelativePaths $qwenToolRequiredFiles `
     -Name 'Qwen 高精度模式工具'
+Assert-RequiredPayloadFiles `
+    -Root $whisperToolSourceRoot `
+    -RelativePaths $whisperToolRequiredFiles `
+    -Name 'Whisper Turbo 快速模式工具'
 
 Push-Location $repositoryRoot
 try {
@@ -173,7 +224,7 @@ try {
             $pythonArguments = @()
         }
         if ($null -eq $pythonLauncher) {
-            throw '运行 Qwen sidecar 测试需要 Python 3。'
+            throw '运行 Qwen 和 Whisper sidecar 测试需要 Python 3。'
         }
 
         Write-Host '运行 Qwen sidecar Python 测试…'
@@ -183,10 +234,23 @@ try {
             throw "Qwen sidecar Python 测试失败，退出码：$LASTEXITCODE"
         }
 
+        Write-Host '运行 Whisper sidecar Python 测试…'
+        & $pythonLauncher.Source @pythonArguments '-m' 'unittest' 'discover' `
+            '-s' (Join-Path $repositoryRoot 'tools\whisper\tests') '-v'
+        if ($LASTEXITCODE -ne 0) {
+            throw "Whisper sidecar Python 测试失败，退出码：$LASTEXITCODE"
+        }
+
         & $pythonLauncher.Source @pythonArguments '-m' 'py_compile' `
             (Join-Path $repositoryRoot 'tools\qwen\qwen_sidecar.py')
         if ($LASTEXITCODE -ne 0) {
             throw "Qwen sidecar Python 语法检查失败，退出码：$LASTEXITCODE"
+        }
+
+        & $pythonLauncher.Source @pythonArguments '-m' 'py_compile' `
+            (Join-Path $repositoryRoot 'tools\whisper\whisper_sidecar.py')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Whisper sidecar Python 语法检查失败，退出码：$LASTEXITCODE"
         }
 
         $testProjects = @(Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'tests') -Filter '*.csproj' -File -Recurse -ErrorAction SilentlyContinue)
@@ -260,6 +324,14 @@ foreach ($qwenToolFile in $qwenToolRequiredFiles) {
         -Destination (Join-Path $qwenToolPackageRoot $qwenToolFile) `
         -Force
 }
+$whisperToolPackageRoot = Join-Path $packageRoot 'tools\whisper'
+New-Item -ItemType Directory -Path $whisperToolPackageRoot -Force | Out-Null
+foreach ($whisperToolFile in $whisperToolRequiredFiles) {
+    Copy-Item `
+        -LiteralPath (Join-Path $whisperToolSourceRoot $whisperToolFile) `
+        -Destination (Join-Path $whisperToolPackageRoot $whisperToolFile) `
+        -Force
+}
 $enginePackageRoot = Join-Path $packageRoot 'tools\engine'
 New-Item -ItemType Directory -Path $enginePackageRoot -Force | Out-Null
 Get-ChildItem -LiteralPath $enginePublishRoot -Force | ForEach-Object {
@@ -282,10 +354,13 @@ Assert-RequiredPayloadFiles `
     -Root $qwenToolPackageRoot `
     -RelativePaths $qwenToolRequiredFiles `
     -Name 'Qwen 高精度模式打包结果'
+Assert-RequiredPayloadFiles `
+    -Root $whisperToolPackageRoot `
+    -RelativePaths $whisperToolRequiredFiles `
+    -Name 'Whisper Turbo 快速模式打包结果'
 
 $appExecutables = @(@(
-        (Join-Path $packageRoot 'InterviewScribe.exe'),
-        (Join-Path $packageRoot 'InterviewScribe.App.exe')
+        (Join-Path $packageRoot 'MediaScribe.exe')
     ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
 if ($appExecutables.Count -ne 1) {
     throw "无法唯一确定应用入口 EXE，找到 $($appExecutables.Count) 个候选项。"
@@ -338,7 +413,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup 编译失败，退出码：$LASTEXITCODE"
 }
 
-$installerPath = Join-Path $releaseRoot 'InterviewScribe-Setup-x64.exe'
+$installerPath = Join-Path $releaseRoot 'MediaScribe-Setup-x64.exe'
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Inno Setup 未生成预期文件：$installerPath"
 }
@@ -348,7 +423,7 @@ $checksumPath = Join-Path $releaseRoot 'SHA256SUMS.txt'
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText(
     $checksumPath,
-    "$installerHash  InterviewScribe-Setup-x64.exe`n",
+    "$installerHash  MediaScribe-Setup-x64.exe`n",
     $utf8WithoutBom)
 Write-Host "安装包：$installerPath"
 Write-Host "SHA-256：$installerHash"

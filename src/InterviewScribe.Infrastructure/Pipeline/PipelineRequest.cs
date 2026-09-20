@@ -8,11 +8,16 @@ public sealed record PipelineRequest(string SourcePath, string OutputDirectory)
     public IReadOnlyList<string> LanguageCodes { get; init; } = ["zh", "en"];
     public TranscriptFormattingOptions FormattingOptions { get; init; } = TranscriptFormattingOptions.Default;
     public TranscriptOutputFormat OutputFormats { get; init; } = TranscriptOutputFormat.Default;
-    public TranscriptionMode Mode { get; init; } = TranscriptionMode.MossLocalFast;
+    public TranscriptionMode Mode { get; init; } = TranscriptionMode.WhisperTurboFast;
 
-    // Kept in memory for this run only. The UI never persists or logs this value,
-    // and the pipeline passes it to the SDK child process through its environment.
-    public string? SdkApiKey { get; init; }
+    /// <summary>
+    /// Requests the retained local MOSS speaker track as a second pass.  It is
+    /// independent from whether speaker labels are printed in a chosen export:
+    /// callers can deliberately compute a structured JSON track without showing
+    /// labels in TXT/MD/PDF.
+    /// </summary>
+    public bool EnableSpeakerDiarization { get; init; }
+
 }
 
 public sealed record PipelineResult(

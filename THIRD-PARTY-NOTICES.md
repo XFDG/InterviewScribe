@@ -1,6 +1,6 @@
 # Third-party notices
 
-InterviewScribe 通过独立进程使用 FFmpeg，并随安装包分发 transcribe.cpp 的 Windows 原生运行库。MOSS 模型不在安装包中，由高精度组件安装器预取，或在首次使用快速模式时下载。精确版本、下载地址、文件大小和 SHA-256 见 `packaging/dependencies.lock.json`。
+MediaScribe 通过独立进程使用 FFmpeg，并随安装包分发 transcribe.cpp 的 Windows 原生运行库。模型权重不在安装包中；MOSS 仅在实际选择 MOSS 或说话人后处理时准备。精确版本、下载地址、文件大小和 SHA-256 见 `packaging/dependencies.lock.json`。
 
 ## FFmpeg 9.0.2
 
@@ -10,7 +10,7 @@ InterviewScribe 通过独立进程使用 FFmpeg，并随安装包分发 transcri
 - 构建来源：<https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-09-19-13-11>
 - 许可说明：<https://ffmpeg.org/legal.html>
 
-FFmpeg 与 InterviewScribe 分开运行，未对 FFmpeg 二进制文件做修改。获取脚本会将上游归档内的 LICENSE/COPYING/README 文件一并放入 `tools/ffmpeg/licenses`。
+FFmpeg 与 MediaScribe 分开运行，未对 FFmpeg 二进制文件做修改。获取脚本会将上游归档内的 LICENSE/COPYING/README 文件一并放入 `tools/ffmpeg/licenses`。
 
 ## transcribe.cpp 0.2.3
 
@@ -28,21 +28,29 @@ FFmpeg 与 InterviewScribe 分开运行，未对 FFmpeg 二进制文件做修改
 - 模型卡：<https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/tree/bfa3d24438711391d8713c6ab0efd6264527757c>
 - 上游模型：<https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize>
 
-模型权重不随本软件安装包分发。高精度组件安装器会预先下载；未安装高精度组件时，应用会在首次使用快速模式时下载。下载后必须核对锁定的文件大小与 SHA-256，失败时不得加载。Apache License 2.0 全文：<https://www.apache.org/licenses/LICENSE-2.0>。
+模型权重不随本软件安装包分发。只有选择 MOSS 本地模式或为 Whisper/Qwen 勾选说话人区分时，应用才会在首次使用时下载。下载后必须核对锁定的文件大小与 SHA-256，失败时不得加载。Apache License 2.0 全文：<https://www.apache.org/licenses/LICENSE-2.0>。
+
+## Faster-Whisper / CTranslate2（可选快速模式组件）
+
+- Faster-Whisper：<https://github.com/SYSTRAN/faster-whisper>，MIT License
+- CTranslate2：<https://github.com/OpenNMT/CTranslate2>，MIT License
+- 快速模式模型：`dropbox-dash/faster-whisper-large-v3-turbo`，模型文件与固定 revision、SHA-256 由依赖锁文件记录
+
+Faster-Whisper、CTranslate2、NVIDIA CUDA 运行时 wheel 和快速模式模型均由用户主动运行组件安装流程后下载到本地，不随 MediaScribe 安装包再分发。相应 Python 包和 NVIDIA 组件继续适用其各自的上游许可条款。
 
 ## Qwen3-ASR 高精度组件（可选）
 
 - 项目：QwenLM/Qwen3-ASR
 - 代码许可证：Apache-2.0
 - 源码：<https://github.com/QwenLM/Qwen3-ASR>
-- ASR 模型：`Qwen/Qwen3-ASR-1.7B-hf`
-- ASR 锁定 revision：`bcd2b5b7f32b480ab5790554cfa8347f246a14f3`
-- 对齐模型：`Qwen/Qwen3-ForcedAligner-0.6B-hf`
-- 对齐锁定 revision：`c07281df297b9905d24a508279258cccf987a064`
+- ASR 模型：`Qwen/Qwen3-ASR-1.7B`
+- ASR 锁定 revision：`d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec`
+- 对齐模型：`Qwen/Qwen3-ForcedAligner-0.6B`
+- 对齐锁定 revision：`6f4d7c9606feb7adf282c9e4b139f28e8695d867`
 - 模型许可证：Apache-2.0
-- 模型卡：<https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf> 和 <https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf>
+- 模型卡：<https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B> 和 <https://www.modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B>
 
-Qwen 模型权重、Python 运行环境及其包不随 InterviewScribe 安装包分发。只有用户主动运行本地高精度组件安装流程时，才会从各上游来源下载到用户的本地数据目录。安装的 Python 包适用其各自随包发布的许可条款。
+Qwen 模型权重、Python 运行环境及其包不随 MediaScribe 安装包分发。只有用户主动运行本地高精度组件安装流程时，才会通过官方 ModelScope 快照下载到用户的本地数据目录。安装的 Python 包适用其各自随包发布的许可条款。
 
 ## Microsoft .NET
 

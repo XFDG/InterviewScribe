@@ -10,7 +10,8 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
-    <ApplicationIcon>..\..\assets\InterviewScribe.ico</ApplicationIcon>
+    <AssemblyName>MediaScribe</AssemblyName>
+    <ApplicationIcon>..\..\assets\MediaScribe.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,10 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\assets\InterviewScribe.ico" Link="Assets\InterviewScribe.ico">
+    <Content Include="..\..\assets\MediaScribe.ico" Link="Assets\MediaScribe.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Resource Include="..\..\assets\interviewscribe-icon.png" Link="Assets\interviewscribe-icon.png" />
+    <Resource Include="..\..\assets\MediaScribe.png" Link="Assets\MediaScribe.png" />
   </ItemGroup>
 </Project>

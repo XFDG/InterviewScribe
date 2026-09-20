@@ -67,7 +67,7 @@ public sealed class RuntimeLocator(AppPaths paths)
         }
 
         throw new FileNotFoundException(
-            "程序安装不完整：缺少 Qwen 高精度转写组件 qwen_sidecar.py。请重新安装面试转写助手。",
+            "程序安装不完整：缺少 Qwen 高精度转写组件 qwen_sidecar.py。请重新安装 MediaScribe。",
             installedPath);
     }
 
@@ -82,6 +82,88 @@ public sealed class RuntimeLocator(AppPaths paths)
         paths.QwenAlignerModelRoot,
         "Qwen3-ForcedAligner-0.6B",
         QwenModelManifest.AlignerRevision);
+
+    public string FindWhisperPython()
+    {
+        var explicitPath = Environment.GetEnvironmentVariable("MEDIASCRIBE_WHISPER_PYTHON");
+        var pythonPath = string.IsNullOrWhiteSpace(explicitPath)
+            ? Path.Combine(paths.WhisperVirtualEnvironmentRoot, "Scripts", "python.exe")
+            : Path.GetFullPath(explicitPath);
+        if (!File.Exists(pythonPath) || new FileInfo(pythonPath).Length == 0)
+        {
+            throw new FileNotFoundException(
+                "尚未安装 Faster-Whisper 快速模式运行环境。请在界面中点击“安装快速模式组件”后重试。",
+                pythonPath);
+        }
+        return pythonPath;
+    }
+
+    public string FindWhisperSidecar()
+    {
+        var explicitPath = Environment.GetEnvironmentVariable("MEDIASCRIBE_WHISPER_SIDECAR");
+        if (!string.IsNullOrWhiteSpace(explicitPath))
+        {
+            return ValidateWhisperSidecar(Path.GetFullPath(explicitPath));
+        }
+
+        var installedPath = Path.Combine(paths.InstallRoot, "tools", "whisper", "whisper_sidecar.py");
+        if (File.Exists(installedPath))
+        {
+            return ValidateWhisperSidecar(installedPath);
+        }
+        var directory = new DirectoryInfo(paths.InstallRoot);
+        for (var level = 0; level < 8 && directory is not null; level++, directory = directory.Parent)
+        {
+            var developmentPath = Path.Combine(directory.FullName, "tools", "whisper", "whisper_sidecar.py");
+            if (File.Exists(developmentPath))
+            {
+                return ValidateWhisperSidecar(developmentPath);
+            }
+        }
+        throw new FileNotFoundException(
+            "程序安装不完整：缺少 Faster-Whisper 转写组件 whisper_sidecar.py。请重新安装 MediaScribe。",
+            installedPath);
+    }
+
+    public string FindWhisperModelDirectory()
+    {
+        var explicitPath = Environment.GetEnvironmentVariable("MEDIASCRIBE_WHISPER_MODEL_PATH");
+        var modelDirectory = Path.GetFullPath(string.IsNullOrWhiteSpace(explicitPath)
+            ? paths.WhisperModelRoot
+            : explicitPath);
+        if (!Directory.Exists(modelDirectory))
+        {
+            throw new DirectoryNotFoundException(
+                $"Whisper large-v3-turbo 模型尚未安装：{modelDirectory}。请点击“安装快速模式组件”。");
+        }
+        foreach (var requiredFile in new[] { "config.json", "model.bin", "tokenizer.json", "preprocessor_config.json" })
+        {
+            var path = Path.Combine(modelDirectory, requiredFile);
+            if (!File.Exists(path) || new FileInfo(path).Length <= 0)
+            {
+                throw new FileNotFoundException(
+                    $"Whisper large-v3-turbo 模型不完整：缺少 {requiredFile}。请重新安装快速模式组件。",
+                    path);
+            }
+        }
+        var markerPath = Path.Combine(modelDirectory, FasterWhisperModelManifest.RevisionMarkerFileName);
+        if (!File.Exists(markerPath) ||
+            !string.Equals(File.ReadAllText(markerPath).Trim(), FasterWhisperModelManifest.Revision, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Whisper large-v3-turbo 模型版本不匹配。请重新安装快速模式组件，或通过 MEDIASCRIBE_WHISPER_MODEL_PATH 指定已校验模型。");
+        }
+        var modelPath = Path.Combine(modelDirectory, FasterWhisperModelManifest.ModelFileName);
+        if (new FileInfo(modelPath).Length != FasterWhisperModelManifest.ModelFileSizeBytes)
+        {
+            throw new InvalidDataException("Whisper large-v3-turbo 权重文件长度不匹配。请重新安装快速模式组件。");
+        }
+        // The installer performs the expensive SHA-256 verification before it
+        // writes the revision marker.  Rehashing a 1.6 GB model on every queue
+        // item would make the fast mode visibly slow, so runtime only verifies
+        // marker, required files and exact locked byte count here.
+        return modelDirectory;
+    }
 
     public string FindTranscribeRuntimeDirectory()
     {
@@ -156,7 +238,7 @@ public sealed class RuntimeLocator(AppPaths paths)
         {
             throw new FileNotFoundException(
                 "程序安装不完整，原生推理库缺少必需文件：" +
-                string.Join("、", missingFiles) + "。请重新安装面试转写助手。");
+                string.Join("、", missingFiles) + "。请重新安装 MediaScribe。");
         }
     }
 
@@ -181,7 +263,7 @@ public sealed class RuntimeLocator(AppPaths paths)
         }
 
         throw new FileNotFoundException(
-            "程序安装不完整：缺少 dependencies.lock.json。请重新安装面试转写助手。",
+            "程序安装不完整：缺少 dependencies.lock.json。请重新安装 MediaScribe。",
             installedLock);
     }
 
@@ -192,6 +274,15 @@ public sealed class RuntimeLocator(AppPaths paths)
             throw new FileNotFoundException("Qwen 高精度转写组件不存在或为空。", path);
         }
 
+        return path;
+    }
+
+    private static string ValidateWhisperSidecar(string path)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
+        {
+            throw new FileNotFoundException("Faster-Whisper 转写组件不存在或为空。", path);
+        }
         return path;
     }
 
@@ -361,7 +452,7 @@ public sealed class RuntimeLocator(AppPaths paths)
             return fromPath;
         }
 
-        throw new FileNotFoundException($"程序安装不完整：缺少 {fileName}。请重新安装面试转写助手。");
+        throw new FileNotFoundException($"程序安装不完整：缺少 {fileName}。请重新安装 MediaScribe。");
     }
 
     private static string? FindOptionalTool(

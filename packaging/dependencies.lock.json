@@ -67,6 +67,23 @@
       "delivery": "installer-prefetch-or-first-run-download",
       "modelCardUrl": "https://huggingface.co/handy-computer/moss-transcribe-diarize-gguf/tree/bfa3d24438711391d8713c6ab0efd6264527757c"
     },
+    "fasterWhisperLargeV3Turbo": {
+      "repository": "dropbox-dash/faster-whisper-large-v3-turbo",
+      "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+      "fileName": "model.bin",
+      "fileSizeBytes": 1617884929,
+      "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+      "requiredFiles": [
+        "config.json",
+        "model.bin",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        "vocabulary.json"
+      ],
+      "license": "MIT",
+      "delivery": "optional-installer-script-download",
+      "modelCardUrl": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/tree/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+    },
     "qwen3Asr17bModelScope": {
       "repository": "Qwen/Qwen3-ASR-1.7B",
       "revision": "d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec",

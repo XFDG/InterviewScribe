@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -38,9 +39,6 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush DangerForeground = CreateBrush(0xC3, 0x3D, 0x51);
     private static readonly SolidColorBrush StageIdleBackground = CreateBrush(0xF5, 0xF6, 0xF9);
     private static readonly SolidColorBrush StageIdleBorder = CreateBrush(0xE5, 0xE9, 0xF2);
-    private static readonly SolidColorBrush CloudAccent = CreateBrush(0xA1, 0x5C, 0x00);
-    private static readonly SolidColorBrush CloudSoftBackground = CreateBrush(0xFF, 0xF4, 0xD9);
-    private static readonly SolidColorBrush CloudStatusDot = CreateBrush(0xF2, 0xB8, 0x4B);
     private static readonly SolidColorBrush LocalStatusDot = CreateBrush(0x54, 0xD6, 0xA1);
 
     private readonly DispatcherTimer _elapsedTimer;
@@ -209,15 +207,12 @@ public partial class MainWindow : Window
             IncludeSpeakers = IncludeSpeakersCheckBox.IsChecked == true
         };
         var transcriptionMode = GetSelectedTranscriptionMode();
-        var sdkApiKey = transcriptionMode == TranscriptionMode.QwenSdkHighAccuracy
-            ? SdkApiKeyPasswordBox.Password.Trim()
-            : null;
 
         PrepareForRun();
         AppendLog($"识别方案：{GetTranscriptionModeDisplayName(transcriptionMode)}");
         AppendLog($"识别语言：{FormatSelectedLanguages(languageCodes)}");
         AppendLog($"输出格式：{FormatOutputFormats(outputFormats)}");
-        AppendLog($"可读文档时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人标注：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
+        AppendLog($"可读文档时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人区分：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
         AppendLog($"队列开始：{queuedItems.Count} 个文件将按顺序处理。");
         _runCancellation = new CancellationTokenSource();
         _pipeline ??= new TranscriptionPipeline();
@@ -257,7 +252,7 @@ public partial class MainWindow : Window
                     var request = new PipelineRequest(queueItem.SourcePath, outputDirectory)
                     {
                         Mode = transcriptionMode,
-                        SdkApiKey = string.IsNullOrWhiteSpace(sdkApiKey) ? null : sdkApiKey,
+                        EnableSpeakerDiarization = IncludeSpeakersCheckBox.IsChecked == true,
                         LanguageCodes = languageCodes,
                         FormattingOptions = formattingOptions,
                         OutputFormats = outputFormats,
@@ -380,52 +375,51 @@ public partial class MainWindow : Window
     private void UpdateTranscriptionModeUi()
     {
         var mode = GetSelectedTranscriptionMode();
-        var isCloudMode = mode == TranscriptionMode.QwenSdkHighAccuracy;
 
         QwenLocalSetupPanel.Visibility = mode == TranscriptionMode.QwenLocalHighAccuracy
             ? Visibility.Visible
             : Visibility.Collapsed;
-        QwenSdkSettingsPanel.Visibility = isCloudMode
+        WhisperSetupPanel.Visibility = mode == TranscriptionMode.WhisperTurboFast
             ? Visibility.Visible
             : Visibility.Collapsed;
 
-        ProcessingModeStatusDot.Fill = isCloudMode ? CloudStatusDot : LocalStatusDot;
-        PrivacyIconBorder.Background = isCloudMode ? CloudSoftBackground : SuccessBackground;
-        PrivacyIconText.Foreground = isCloudMode ? CloudAccent : SuccessForeground;
+        ProcessingModeStatusDot.Fill = LocalStatusDot;
+        PrivacyIconBorder.Background = SuccessBackground;
+        PrivacyIconText.Foreground = SuccessForeground;
 
         switch (mode)
         {
             case TranscriptionMode.QwenLocalHighAccuracy:
                 ProcessingModeStatusText.Text = "本地高精度";
-                RecognitionSummaryTitleText.Text = "Qwen3-ASR 1.7B + 本地说话人轨道";
-                RecognitionSummaryDetailText.Text = "Qwen 负责最终文字与时间对齐，MOSS 在本地提供说话人轨道。";
+                RecognitionSummaryTitleText.Text = "Qwen3-ASR 1.7B + ForcedAligner";
+                RecognitionSummaryDetailText.Text = "Qwen 负责最终文字与逐词时间轴；只有勾选说话人区分时才额外运行本地 MOSS。";
                 PrivacyTitleText.Text = "隐私保护";
                 PrivacySubtitleText.Text = "文件不会上传云端";
-                PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次安装时会下载并校验 MOSS、Qwen 和对齐模型，安装后可断网运行。";
+                PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次安装会从官方 ModelScope 下载并校验 Qwen 与对齐模型，安装后可断网运行。";
                 FooterModeText.Text = "MediaScribe · Qwen 本地高精度";
-                StageTranscribeText.Text = "③ Qwen 识别与分人";
+                StageTranscribeText.Text = "③ Qwen 识别与对齐";
                 break;
 
-            case TranscriptionMode.QwenSdkHighAccuracy:
-                ProcessingModeStatusText.Text = "联网云端处理";
-                RecognitionSummaryTitleText.Text = "Qwen 官方 SDK + 本地说话人轨道";
-                RecognitionSummaryDetailText.Text = "Qwen 云端生成文字；本地按语音活动和 MOSS 说话人边界生成分段时间轴，结果在本机合并。";
-                PrivacyTitleText.Text = "云端处理提示";
-                PrivacySubtitleText.Text = "提取的音频会发送到 Qwen 官方服务";
-                PrivacyDetailText.Text = "原始媒体文件保留在本机，但为了识别文字，提取后的音频片段会上传。返回结果在本机与说话人轨道合并；云端数据处理与保留规则以 Qwen 服务条款为准。";
-                FooterModeText.Text = "MediaScribe · Qwen 官方 SDK";
-                StageTranscribeText.Text = "③ Qwen 云端识别与分人";
+            case TranscriptionMode.MossLocalFast:
+                ProcessingModeStatusText.Text = "完全本地处理";
+                RecognitionSummaryTitleText.Text = "MOSS-Transcribe-Diarize Q8_0";
+                RecognitionSummaryDetailText.Text = "文字、时间轴和说话人均由本地 MOSS 一次生成，适合兼容既有工作流。";
+                PrivacyTitleText.Text = "隐私保护";
+                PrivacySubtitleText.Text = "文件不会上传云端";
+                PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次使用仅下载公开 MOSS 模型。";
+                FooterModeText.Text = "MediaScribe · MOSS 本地兼容";
+                StageTranscribeText.Text = "③ MOSS 识别与分人";
                 break;
 
             default:
                 ProcessingModeStatusText.Text = "完全本地处理";
-                RecognitionSummaryTitleText.Text = "MOSS-Transcribe-Diarize Q8_0";
-                RecognitionSummaryDetailText.Text = "文字、时间轴和说话人均由本地 MOSS 生成，速度优先。";
+                RecognitionSummaryTitleText.Text = "Whisper large-v3-turbo + Faster-Whisper";
+                RecognitionSummaryDetailText.Text = "Whisper 生成文字与时间轴；勾选说话人区分时，再按需调用本地 MOSS。";
                 PrivacyTitleText.Text = "隐私保护";
                 PrivacySubtitleText.Text = "文件不会上传云端";
-                PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次使用仅下载公开模型文件。";
-                FooterModeText.Text = "MediaScribe · MOSS 本地快速";
-                StageTranscribeText.Text = "③ 识别与分人";
+                PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。Whisper 模型与 CUDA 运行组件安装后均可断网使用。";
+                FooterModeText.Text = "MediaScribe · Whisper Turbo 快速模式";
+                StageTranscribeText.Text = "③ Whisper 识别";
                 break;
         }
 
@@ -439,33 +433,41 @@ public partial class MainWindow : Window
 
     private async void InstallQwenRuntime_Click(object sender, RoutedEventArgs e)
     {
-        await LaunchQwenInstallerAsync(skipLocalModels: false);
+        await LaunchRuntimeInstallerAsync(
+            FindQwenInstallerPath(),
+            "Qwen 高精度组件",
+            "Qwen3-ASR、ForcedAligner 与标准 PyTorch CUDA 运行环境已校验完成。现在可断网使用高精度模式。");
     }
 
-    private async void InstallQwenSdkRuntime_Click(object sender, RoutedEventArgs e)
+    private async void InstallWhisperRuntime_Click(object sender, RoutedEventArgs e)
     {
-        await LaunchQwenInstallerAsync(skipLocalModels: true);
+        await LaunchRuntimeInstallerAsync(
+            FindWhisperInstallerPath(),
+            "Whisper Turbo 快速模式组件",
+            "Whisper large-v3-turbo、Faster-Whisper 与 Windows CUDA 运行组件已校验完成。现在可断网使用快速模式。");
     }
 
-    private async Task LaunchQwenInstallerAsync(bool skipLocalModels)
+    private async Task LaunchRuntimeInstallerAsync(
+        string? scriptPath,
+        string componentName,
+        string successfulMessage)
     {
         if (_isRunning || _isInstallingQwen)
         {
             return;
         }
 
-        var scriptPath = FindQwenInstallerPath();
         if (scriptPath is null)
         {
             ShowFriendlyError(
-                "找不到高精度组件安装脚本。请重新安装 MediaScribe，或确认 tools\\qwen\\Install-QwenRuntime.ps1 存在。",
+                $"找不到 {componentName} 安装脚本。请重新安装 MediaScribe。",
                 "缺少安装组件");
             return;
         }
 
         _isInstallingQwen = true;
         InstallQwenRuntimeButton.IsEnabled = false;
-        InstallQwenSdkRuntimeButton.IsEnabled = false;
+        InstallWhisperRuntimeButton.IsEnabled = false;
         StartButton.IsEnabled = false;
         ChangeFileButton.IsEnabled = false;
         DropZoneBorder.IsEnabled = false;
@@ -488,57 +490,48 @@ public partial class MainWindow : Window
             startInfo.ArgumentList.Add("Bypass");
             startInfo.ArgumentList.Add("-File");
             startInfo.ArgumentList.Add(scriptPath);
-            if (skipLocalModels)
-            {
-                startInfo.ArgumentList.Add("-SkipLocalModels");
-            }
-
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("Windows PowerShell 安装进程未能启动。");
 
-            AppendLog(skipLocalModels
-                ? "SDK 运行组件与 MOSS 模型安装窗口已打开，正在等待安装完成…"
-                : "高精度组件安装窗口已打开，正在等待运行环境与模型安装完成…");
+            AppendLog($"{componentName}安装窗口已打开，正在等待运行环境与模型安装完成…");
 
             await process.WaitForExitAsync();
 
             if (process.ExitCode == 0)
             {
-                AppendLog(skipLocalModels ? "SDK 运行组件与 MOSS 模型安装完成。" : "高精度运行组件和本地模型安装完成。");
+                AppendLog($"{componentName}安装完成。");
                 MessageBox.Show(
                     this,
-                    skipLocalModels
-                        ? "SDK 运行组件和 MOSS 模型已校验完成。识别时需要联网，并提供有效的 DashScope API Key。"
-                        : "高精度组件安装完成。MOSS 与两套 Qwen 权重均已校验，现在可以断网识别。",
+                    successfulMessage,
                     "安装完成",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
             }
             else if (process.ExitCode == InstallerAlreadyRunningExitCode)
             {
-                AppendLog("未启动安装：另一个 MediaScribe 高精度组件安装程序仍在运行。");
+                AppendLog($"未启动安装：另一个 MediaScribe {componentName}安装程序仍在运行。");
                 ShowFriendlyError(
-                    "另一项高精度组件安装仍在运行。请等待现有的 PowerShell 安装窗口完成后再重试。",
+                    "另一项运行组件安装仍在进行。请等待现有的 PowerShell 安装窗口完成后再重试。",
                     "安装正在进行");
             }
             else
             {
-                AppendLog($"Qwen 运行组件安装失败，PowerShell 退出码：{process.ExitCode}。");
+                AppendLog($"{componentName}安装失败，PowerShell 退出码：{process.ExitCode}。");
                 ShowFriendlyError(
-                    "高精度组件没有安装成功。请查看刚才的 PowerShell 窗口输出，修复问题后重试。",
+                    $"{componentName}没有安装成功。请查看刚才的 PowerShell 窗口输出，修复问题后重试。",
                     "安装失败");
             }
         }
         catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            AppendLog($"无法启动 Qwen 运行组件安装程序：{ex.Message}");
+            AppendLog($"无法启动 {componentName}安装程序：{ex.Message}");
             ShowFriendlyError("无法启动 Windows PowerShell 安装窗口。请确认 Windows PowerShell 可用后重试。", "无法启动安装");
         }
         finally
         {
             _isInstallingQwen = false;
             InstallQwenRuntimeButton.IsEnabled = !_isRunning;
-            InstallQwenSdkRuntimeButton.IsEnabled = !_isRunning;
+            InstallWhisperRuntimeButton.IsEnabled = !_isRunning;
             ChangeFileButton.IsEnabled = !_isRunning;
             DropZoneBorder.IsEnabled = !_isRunning;
             QueueListBox.IsEnabled = !_isRunning;
@@ -1345,37 +1338,41 @@ public partial class MainWindow : Window
             return TranscriptionMode.QwenLocalHighAccuracy;
         }
 
-        return QwenSdkModeRadioButton.IsChecked == true
-            ? TranscriptionMode.QwenSdkHighAccuracy
-            : TranscriptionMode.MossLocalFast;
+        return MossLocalModeRadioButton.IsChecked == true
+            ? TranscriptionMode.MossLocalFast
+            : TranscriptionMode.WhisperTurboFast;
     }
 
     private static string GetTranscriptionModeDisplayName(TranscriptionMode mode) => mode switch
     {
-        TranscriptionMode.QwenLocalHighAccuracy => "Qwen3-ASR 1.7B 本地高精度",
-        TranscriptionMode.QwenSdkHighAccuracy => "Qwen 官方 SDK 云端高精度",
-        _ => "MOSS 本地快速"
+        TranscriptionMode.WhisperTurboFast => "Whisper Turbo / Faster-Whisper 快速模式",
+        TranscriptionMode.QwenLocalHighAccuracy => "Qwen3-ASR + ForcedAligner 本地高精度",
+        TranscriptionMode.MossLocalFast => "MOSS 本地兼容模式",
+        _ => "未知模式"
     };
 
     private static string GetSelectionPrompt(TranscriptionMode mode) => mode switch
     {
+        TranscriptionMode.WhisperTurboFast => "添加媒体文件后即可使用快速模式。首次使用请先安装 Whisper Turbo 组件。",
         TranscriptionMode.QwenLocalHighAccuracy => "添加媒体文件后即可使用本地高精度识别。首次使用请先安装高精度组件。",
-        TranscriptionMode.QwenSdkHighAccuracy => "添加媒体文件后即可使用云端高精度识别。首次使用请先安装 SDK 运行组件。",
-        _ => "添加媒体文件后即可完全在本地转写。首次使用需下载模型。"
+        TranscriptionMode.MossLocalFast => "添加媒体文件后即可使用 MOSS 本地兼容模式。首次使用需下载模型。",
+        _ => "请选择一种本地识别方案。"
     };
 
     private static string GetReadyDetail(TranscriptionMode mode) => mode switch
     {
+        TranscriptionMode.WhisperTurboFast => "点击“开始转写”后会按队列顺序处理。如尚未安装，请先使用右侧的“安装快速模式组件”。",
         TranscriptionMode.QwenLocalHighAccuracy => "点击“开始转写”后会按队列顺序处理。如尚未安装，请先使用右侧的“安装高精度组件”。",
-        TranscriptionMode.QwenSdkHighAccuracy => "点击“开始转写”后会按队列顺序处理。如尚未安装，请先使用右侧的“安装 SDK 运行组件”。",
-        _ => "点击“开始转写”后会按队列顺序处理。首次运行会先下载本地模型。"
+        TranscriptionMode.MossLocalFast => "点击“开始转写”后会按队列顺序处理。首次运行会先下载 MOSS 本地模型。",
+        _ => "请选择一种本地识别方案。"
     };
 
     private static string GetPreparationMessage(TranscriptionMode mode) => mode switch
     {
-        TranscriptionMode.QwenLocalHighAccuracy => "正在检查 Qwen 本地权重、对齐模型和说话人模型…",
-        TranscriptionMode.QwenSdkHighAccuracy => "正在检查本地说话人模型和 Qwen SDK 环境…",
-        _ => "正在检查 MOSS 本地模型和运行环境…"
+        TranscriptionMode.WhisperTurboFast => "正在检查 Whisper Turbo 本地模型和 Faster-Whisper CUDA 环境…",
+        TranscriptionMode.QwenLocalHighAccuracy => "正在检查 Qwen 本地权重、对齐模型和 PyTorch CUDA 环境…",
+        TranscriptionMode.MossLocalFast => "正在检查 MOSS 本地模型和 Vulkan 运行环境…",
+        _ => "正在检查本地运行环境…"
     };
 
     private static string? FindQwenInstallerPath()
@@ -1398,22 +1395,23 @@ public partial class MainWindow : Window
         return File.Exists(workingDirectoryCandidate) ? workingDirectoryCandidate : null;
     }
 
-    private string RedactSensitiveText(string text)
+    private static string? FindWhisperInstallerPath()
     {
-        var redacted = text;
-        var enteredApiKey = SdkApiKeyPasswordBox.Password;
-        if (!string.IsNullOrWhiteSpace(enteredApiKey))
+        var baseDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var current = baseDirectory; current is not null; current = current.Parent)
         {
-            redacted = redacted.Replace(enteredApiKey, "[API Key 已隐藏]", StringComparison.Ordinal);
+            var candidate = Path.Combine(current.FullName, "tools", "whisper", "Install-FasterWhisperRuntime.ps1");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
         }
-
-        var environmentApiKey = Environment.GetEnvironmentVariable("DASHSCOPE_API_KEY");
-        if (!string.IsNullOrWhiteSpace(environmentApiKey))
-        {
-            redacted = redacted.Replace(environmentApiKey, "[API Key 已隐藏]", StringComparison.Ordinal);
-        }
-
-        return redacted;
+        var workingDirectoryCandidate = Path.Combine(
+            Environment.CurrentDirectory,
+            "tools",
+            "whisper",
+            "Install-FasterWhisperRuntime.ps1");
+        return File.Exists(workingDirectoryCandidate) ? workingDirectoryCandidate : null;
     }
 
     private static string FormatSelectedLanguages(IReadOnlyList<string> languageCodes) =>
@@ -1514,13 +1512,28 @@ public partial class MainWindow : Window
         {
             FileNotFoundException => exception.Message,
             UnauthorizedAccessException => "没有权限读取视频或写入输出文件夹。请更换输出位置后重试。",
-            HttpRequestException => "模型或云端服务访问失败。请检查网络、API Key 和服务配置后重试。",
+            HttpRequestException => "本地模型组件下载或更新失败。请检查网络后重新安装对应组件；已安装的本地识别不需要联网。",
             IOException => $"文件读写失败：{exception.Message}",
             InvalidDataException => $"视频或识别结果格式异常：{exception.Message}",
             _ => string.IsNullOrWhiteSpace(exception.Message) ? "发生未知错误，请展开运行记录查看详情。" : exception.Message
         };
 
         return RedactSensitiveText(message);
+    }
+
+    // Installer diagnostics can include a user-provided environment variable.
+    // Keep the on-screen log useful without ever echoing an access token.
+    private static string RedactSensitiveText(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        return Regex.Replace(
+            value,
+            "(?i)(HF_TOKEN|MODELSCOPE_API_TOKEN|MODELSCOPE_TOKEN)\\s*[=:]\\s*[^\\s,;]+",
+            "$1=[已隐藏]");
     }
 
     private void ShowFriendlyError(string message, string title)

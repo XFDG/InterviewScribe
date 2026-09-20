@@ -36,8 +36,8 @@ internal static class PdfTranscriptWriter
         cancellationToken.ThrowIfCancellationRequested();
         using var document = new PdfDocument();
         document.Info.Title = $"{transcript.SourceFileName} - 转写";
-        document.Info.Author = "InterviewScribe";
-        document.Info.Creator = "InterviewScribe";
+        document.Info.Author = "MediaScribe";
+        document.Info.Creator = "MediaScribe";
         document.Info.CreationDate = transcript.CreatedAt.LocalDateTime;
 
         var text = TranscriptFormatter.ToTxt(transcript, options: formattingOptions).ReplaceLineEndings("\n");

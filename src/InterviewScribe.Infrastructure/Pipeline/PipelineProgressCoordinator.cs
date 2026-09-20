@@ -10,6 +10,7 @@ internal sealed class PipelineProgressCoordinator
 
     private readonly object _gate = new();
     private readonly TranscriptionMode _mode;
+    private readonly bool _usesMoss;
     private readonly IProgress<OperationProgress>? _target;
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private double _lastOverallFraction;
@@ -21,8 +22,17 @@ internal sealed class PipelineProgressCoordinator
     public PipelineProgressCoordinator(
         TranscriptionMode mode,
         IProgress<OperationProgress>? target)
+        : this(mode, mode == TranscriptionMode.MossLocalFast, target)
+    {
+    }
+
+    public PipelineProgressCoordinator(
+        TranscriptionMode mode,
+        bool usesMoss,
+        IProgress<OperationProgress>? target)
     {
         _mode = mode;
+        _usesMoss = usesMoss;
         _target = target;
     }
 
@@ -120,15 +130,16 @@ internal sealed class PipelineProgressCoordinator
 
     private (double Start, double End) GetRange(PipelinePhase phase)
     {
-        var highAccuracy = _mode != TranscriptionMode.MossLocalFast;
+        var allInOneMoss = _mode == TranscriptionMode.MossLocalFast;
+        var recognitionStart = _usesMoss ? 0.48 : 0.20;
         return phase switch
         {
             PipelinePhase.None => (0, 0),
             PipelinePhase.ProbeMedia => (0, 0.03),
             PipelinePhase.PrepareModel => (0.03, 0.10),
             PipelinePhase.ExtractAudio => (0.10, 0.20),
-            PipelinePhase.MossDiarization => highAccuracy ? (0.20, 0.48) : (0.20, 0.94),
-            PipelinePhase.QwenRecognition => highAccuracy ? (0.48, 0.94) : (0.94, 0.94),
+            PipelinePhase.MossDiarization => allInOneMoss ? (0.20, 0.94) : (0.20, 0.48),
+            PipelinePhase.QwenRecognition => allInOneMoss ? (0.94, 0.94) : (recognitionStart, 0.94),
             PipelinePhase.Validate => (0.94, 0.97),
             PipelinePhase.Export => (0.97, 0.999),
             PipelinePhase.Completed => (1, 1),

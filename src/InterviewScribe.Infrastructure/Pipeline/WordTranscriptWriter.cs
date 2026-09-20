@@ -191,8 +191,8 @@ internal static class WordTranscriptWriter
                 new XAttribute(XNamespace.Xmlns + "dcterms", DublinCoreTerms),
                 new XAttribute(XNamespace.Xmlns + "xsi", Xsi),
                 new XElement(DublinCore + "title", $"{document.SourceFileName} - 转写"),
-                new XElement(DublinCore + "creator", "InterviewScribe"),
-                new XElement(CoreProperties + "lastModifiedBy", "InterviewScribe"),
+                new XElement(DublinCore + "creator", "MediaScribe"),
+                new XElement(CoreProperties + "lastModifiedBy", "MediaScribe"),
                 new XElement(DublinCoreTerms + "created", new XAttribute(Xsi + "type", "dcterms:W3CDTF"), created),
                 new XElement(DublinCoreTerms + "modified", new XAttribute(Xsi + "type", "dcterms:W3CDTF"), created)));
     }
@@ -201,7 +201,7 @@ internal static class WordTranscriptWriter
         new XDeclaration("1.0", "UTF-8", "yes"),
         new XElement(ExtendedProperties + "Properties",
             new XAttribute(XNamespace.Xmlns + "vt", VTypes),
-            new XElement(ExtendedProperties + "Application", "InterviewScribe")));
+            new XElement(ExtendedProperties + "Application", "MediaScribe")));
 
     private static async Task WriteEntryAsync(
         ZipArchive archive,

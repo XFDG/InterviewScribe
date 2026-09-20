@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""InterviewScribe local, offline Qwen transcription sidecar."""
+"""MediaScribe local, offline Qwen transcription sidecar."""
 
 from __future__ import annotations
 
@@ -751,7 +751,7 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = JsonArgumentParser(description="InterviewScribe local Qwen sidecar", allow_abbrev=False)
+    parser = JsonArgumentParser(description="MediaScribe local Qwen sidecar", allow_abbrev=False)
     parser.add_argument("--mode", required=True, choices=("local",))
     parser.add_argument("--audio", required=True)
     parser.add_argument("--output", required=True)

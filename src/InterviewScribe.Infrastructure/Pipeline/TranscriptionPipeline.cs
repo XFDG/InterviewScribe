@@ -10,11 +10,11 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 
 public sealed class TranscriptionPipeline
 {
-    private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(2);
+    private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(8);
     private static readonly TimeSpan VulkanProtectedContextMaximumDuration = TimeSpan.FromMinutes(25);
-    internal const int VulkanProtectedContextTokens = 32_768;
-    private const string QwenLocalDisplayName = "Qwen3-ASR-1.7B-hf + MOSS 说话人区分";
-    private const string QwenSdkDisplayName = "qwen3-asr-flash SDK + MOSS 说话人区分";
+    internal const int VulkanProtectedContextTokens = 16_384;
+    private const string WhisperTurboDisplayName = "Whisper large-v3-turbo + Faster-Whisper";
+    private const string QwenLocalDisplayName = "Qwen3-ASR 1.7B + ForcedAligner";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -69,7 +69,8 @@ public sealed class TranscriptionPipeline
             throw new ArgumentException("请至少选择一种受支持的输出格式。", nameof(request));
         }
 
-        var progressCoordinator = new PipelineProgressCoordinator(request.Mode, progress);
+        var useMoss = request.Mode == TranscriptionMode.MossLocalFast || request.EnableSpeakerDiarization;
+        var progressCoordinator = new PipelineProgressCoordinator(request.Mode, useMoss, progress);
 
         _paths.EnsureCreated();
         CleanupOldJobs();
@@ -78,14 +79,23 @@ public sealed class TranscriptionPipeline
         // A damaged installation should fail immediately with an actionable message.
         var ffmpegPath = _runtimeLocator.FindFfmpeg();
         var ffprobePath = _runtimeLocator.FindFfprobe();
-        var engineHostPath = _runtimeLocator.FindEngineHost();
-        var transcribeRuntimeDirectory = _runtimeLocator.FindTranscribeRuntimeDirectory();
-        var qwenRuntime = ResolveQwenRuntime(request.Mode, request.SdkApiKey);
+        string? engineHostPath = null;
+        string? transcribeRuntimeDirectory = null;
+        if (useMoss)
+        {
+            engineHostPath = _runtimeLocator.FindEngineHost();
+            transcribeRuntimeDirectory = _runtimeLocator.FindTranscribeRuntimeDirectory();
+        }
+
+        var qwenRuntime = ResolveQwenRuntime(request.Mode);
+        var whisperRuntime = ResolveWhisperRuntime(request.Mode);
+        var gpuProfile = GpuExecutionProfile.Detect();
 
         var jobDirectory = _paths.CreateJobDirectory();
         var wavPath = Path.Combine(jobDirectory, "audio.wav");
         var mossResultPath = Path.Combine(jobDirectory, "moss-result.json");
         var qwenResultPath = Path.Combine(jobDirectory, "qwen-result.json");
+        var whisperResultPath = Path.Combine(jobDirectory, "whisper-result.json");
         var logMessages = new List<string>();
         var succeeded = false;
 
@@ -124,28 +134,51 @@ public sealed class TranscriptionPipeline
             }
 
             // Validate the media before a first-run model download. Bad, silent or
-            // over-limit input should fail quickly without consuming ~1 GB of data.
-            progressCoordinator.Report(
-                PipelinePhase.PrepareModel,
-                JobState.WaitingForModel,
-                "正在检查 MOSS 本地模型…",
-                0);
-
-            string modelPath;
-            using (var modelStore = new ModelStore())
+            // over-limit input should fail quickly without consuming model data.
+            string? mossModelPath = null;
+            if (useMoss)
             {
-                modelPath = await modelStore.EnsureAsync(
+                progressCoordinator.Report(
+                    PipelinePhase.PrepareModel,
+                    JobState.WaitingForModel,
+                    "正在检查 MOSS 本地模型…",
+                    0);
+                using var modelStore = new ModelStore();
+                mossModelPath = await modelStore.EnsureAsync(
                     _paths,
                     progressCoordinator.ForPhase(PipelinePhase.PrepareModel),
                     cancellationToken).ConfigureAwait(false);
+                progressCoordinator.Report(
+                    PipelinePhase.PrepareModel,
+                    JobState.VerifyingModel,
+                    "MOSS 本地模型已校验。",
+                    1);
+                AddLog(logMessages, $"MOSS 模型已校验：{Path.GetFileName(mossModelPath)}", diagnostics);
             }
-
-            progressCoordinator.Report(
-                PipelinePhase.PrepareModel,
-                JobState.VerifyingModel,
-                "MOSS 本地模型已校验。",
-                1);
-            AddLog(logMessages, $"模型已校验：{Path.GetFileName(modelPath)}", diagnostics);
+            else
+            {
+                var selectedModel = request.Mode switch
+                {
+                    TranscriptionMode.WhisperTurboFast => "Whisper large-v3-turbo 本地模型",
+                    TranscriptionMode.QwenLocalHighAccuracy => "Qwen3-ASR 与 ForcedAligner 本地模型",
+                    _ => throw new ArgumentOutOfRangeException(nameof(request.Mode)),
+                };
+                progressCoordinator.Report(
+                    PipelinePhase.PrepareModel,
+                    JobState.VerifyingModel,
+                    $"已检查 {selectedModel}。",
+                    1);
+                AddLog(logMessages, $"已检查 {selectedModel}；未启用 MOSS 说话人后处理。", diagnostics);
+            }
+            var memoryLabel = gpuProfile.DedicatedMemoryMiB is int memory
+                ? $"{memory:N0} MiB"
+                : "未能查询";
+            AddLog(
+                logMessages,
+                $"硬件自适应：{gpuProfile.AdapterName}，显存 {memoryLabel}；" +
+                $"MOSS 上下文 {gpuProfile.MossContextTokens:N0} token，" +
+                $"Qwen 分块 {gpuProfile.QwenChunkSeconds} 秒，Whisper 批大小 {gpuProfile.WhisperBatchSize}。",
+                diagnostics);
             cancellationToken.ThrowIfCancellationRequested();
 
             progressCoordinator.Report(
@@ -192,82 +225,116 @@ public sealed class TranscriptionPipeline
                     diagnostics);
             }
 
-            progressCoordinator.Report(
-                PipelinePhase.MossDiarization,
-                JobState.ReadyToTranscribe,
-                "正在初始化显卡推理…",
-                0);
-
-            await RunMossAsync(
-                ffmpegPath,
-                languageSelection,
-                engineHostPath,
-                transcribeRuntimeDirectory,
-                modelPath,
-                wavPath,
-                mossResultPath,
-                sourcePath,
-                recognitionDuration,
-                jobDirectory,
-                progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
-                progressCoordinator.ResetEta,
-                logMessages,
-                diagnostics,
-                cancellationToken).ConfigureAwait(false);
-
-            progressCoordinator.Report(
-                PipelinePhase.MossDiarization,
-                JobState.Transcribing,
-                "正在检查 MOSS 说话人轨道…",
-                1);
-            var mossResult = await ReadEngineResultAsync(mossResultPath, cancellationToken).ConfigureAwait(false);
-            TranscriptDocument document;
-            if (request.Mode == TranscriptionMode.MossLocalFast)
+            EngineResultDto? mossResult = null;
+            if (useMoss)
             {
-                document = CreateValidatedDocument(
-                    mossResult,
+                progressCoordinator.Report(
+                    PipelinePhase.MossDiarization,
+                    JobState.ReadyToTranscribe,
+                    request.Mode == TranscriptionMode.MossLocalFast
+                        ? "正在初始化 MOSS 显卡推理…"
+                        : "正在生成可选的本地说话人轨道…",
+                    0);
+                await RunMossAsync(
+                    ffmpegPath,
+                    languageSelection,
+                    engineHostPath ?? throw new InvalidOperationException("MOSS 引擎宿主未初始化。"),
+                    transcribeRuntimeDirectory ?? throw new InvalidOperationException("MOSS 运行库未初始化。"),
+                    mossModelPath ?? throw new InvalidOperationException("MOSS 模型未初始化。"),
+                    wavPath,
+                    mossResultPath,
                     sourcePath,
-                    documentDuration,
-                    ModelStore.MossQ8.DisplayName,
-                    ModelStore.MossQ8.Revision);
-            }
-            else
-            {
-                // Validate the diarization track before launching the more expensive
-                // high-accuracy pass. Qwen supplies text/timestamps; MOSS supplies speakers.
+                    recognitionDuration,
+                    gpuProfile,
+                    jobDirectory,
+                    progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
+                    progressCoordinator.ResetEta,
+                    logMessages,
+                    diagnostics,
+                    cancellationToken).ConfigureAwait(false);
+                progressCoordinator.Report(
+                    PipelinePhase.MossDiarization,
+                    JobState.Transcribing,
+                    "正在检查 MOSS 说话人轨道…",
+                    1);
+                mossResult = await ReadEngineResultAsync(mossResultPath, cancellationToken).ConfigureAwait(false);
                 _ = CreateValidatedDocument(
                     mossResult,
                     sourcePath,
                     documentDuration,
                     ModelStore.MossQ8.DisplayName,
                     ModelStore.MossQ8.Revision);
-
-                var highAccuracyRun = await RunQwenAsync(
-                    request.Mode,
-                    qwenRuntime ?? throw new InvalidOperationException("Qwen 运行环境未初始化。"),
-                    languageSelection,
-                    wavPath,
-                    qwenResultPath,
-                    mossResultPath,
-                    jobDirectory,
-                    progressCoordinator.ForPhase(PipelinePhase.QwenRecognition),
-                    diagnostics,
-                    cancellationToken).ConfigureAwait(false);
-                AddLog(
-                    logMessages,
-                    $"Qwen 高精度识别完成（耗时 {FormatDuration(highAccuracyRun.Elapsed)}）。",
-                    diagnostics);
-
-                var qwenResult = await ReadEngineResultAsync(qwenResultPath, cancellationToken).ConfigureAwait(false);
-                var mergedResult = MergeHighAccuracyResults(request.Mode, qwenResult, mossResult);
-                var (modelName, modelRevision) = GetHighAccuracyModelIdentity(request.Mode);
-                document = CreateValidatedDocument(
-                    mergedResult,
-                    sourcePath,
-                    documentDuration,
-                    modelName,
-                    modelRevision);
             }
+
+            EngineResultDto recognitionResult;
+            string modelName;
+            string modelRevision;
+            switch (request.Mode)
+            {
+                case TranscriptionMode.MossLocalFast:
+                    recognitionResult = mossResult ?? throw new InvalidOperationException("MOSS 结果未生成。");
+                    modelName = ModelStore.MossQ8.DisplayName;
+                    modelRevision = ModelStore.MossQ8.Revision;
+                    break;
+
+                case TranscriptionMode.WhisperTurboFast:
+                {
+                    var run = await RunWhisperAsync(
+                        whisperRuntime ?? throw new InvalidOperationException("Whisper 运行环境未初始化。"),
+                        languageSelection,
+                        wavPath,
+                        whisperResultPath,
+                        gpuProfile,
+                        jobDirectory,
+                        progressCoordinator.ForPhase(PipelinePhase.QwenRecognition),
+                        diagnostics,
+                        cancellationToken).ConfigureAwait(false);
+                    AddLog(logMessages, $"Whisper Turbo 识别完成（耗时 {FormatDuration(run.Elapsed)}）。", diagnostics);
+                    var whisperResult = await ReadEngineResultAsync(whisperResultPath, cancellationToken).ConfigureAwait(false);
+                    recognitionResult = MergeRecognitionWithOptionalMoss(
+                        whisperResult,
+                        mossResult,
+                        "Whisper 的文字与时间轴；说话人标签来自本地 MOSS 轨道并按时间重叠合并。",
+                        "未启用说话人区分；Whisper 结果保留时间轴和文字。"
+                    );
+                    modelName = WhisperTurboDisplayName;
+                    modelRevision = FasterWhisperModelManifest.Revision;
+                    break;
+                }
+
+                case TranscriptionMode.QwenLocalHighAccuracy:
+                {
+                    var run = await RunQwenAsync(
+                        qwenRuntime ?? throw new InvalidOperationException("Qwen 运行环境未初始化。"),
+                        languageSelection,
+                        wavPath,
+                        qwenResultPath,
+                        gpuProfile.QwenChunkSeconds,
+                        jobDirectory,
+                        progressCoordinator.ForPhase(PipelinePhase.QwenRecognition),
+                        diagnostics,
+                        cancellationToken).ConfigureAwait(false);
+                    AddLog(logMessages, $"Qwen 高精度识别完成（耗时 {FormatDuration(run.Elapsed)}）。", diagnostics);
+                    var qwenResult = await ReadEngineResultAsync(qwenResultPath, cancellationToken).ConfigureAwait(false);
+                    recognitionResult = MergeRecognitionWithOptionalMoss(
+                        qwenResult,
+                        mossResult,
+                        "Qwen 本地模型生成文字与逐词对齐；说话人标签来自本地 MOSS 轨道并按时间重叠合并。",
+                        "未启用说话人区分；Qwen 的文字和逐词时间轴完全来自本地模型。"
+                    );
+                    (modelName, modelRevision) = GetHighAccuracyModelIdentity();
+                    break;
+                }
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(request.Mode));
+            }
+            var document = CreateValidatedDocument(
+                recognitionResult,
+                sourcePath,
+                documentDuration,
+                modelName,
+                modelRevision);
 
             progressCoordinator.Report(
                 PipelinePhase.Validate,
@@ -346,6 +413,7 @@ public sealed class TranscriptionPipeline
         string finalResultPath,
         string sourcePath,
         TimeSpan audioDuration,
+        GpuExecutionProfile gpuProfile,
         string jobDirectory,
         IProgress<OperationProgress>? progress,
         Action resetEta,
@@ -372,7 +440,7 @@ public sealed class TranscriptionPipeline
 
         AddLog(
             logMessages,
-            $"GPU 优先：每个 MOSS 分段将使用 {VulkanProtectedContextTokens:N0}-token 显存保护；" +
+            $"GPU 优先：{gpuProfile.AdapterName} 将使用 {gpuProfile.MossContextTokens:N0}-token 保守显存窗口；" +
             "若某段无法保证完整输出，只对该段用 CPU 完整重试。",
             diagnostics);
 
@@ -432,6 +500,7 @@ public sealed class TranscriptionPipeline
                         runLabel,
                         chunk,
                         chunks.Count,
+                        gpuProfile,
                         chunkProgress,
                         resetEta,
                         logMessages,
@@ -502,6 +571,7 @@ public sealed class TranscriptionPipeline
         string? runLabel,
         MossChunkPlan chunk,
         int chunkCount,
+        GpuExecutionProfile gpuProfile,
         IProgress<OperationProgress>? progress,
         Action resetEta,
         ICollection<string> logMessages,
@@ -521,7 +591,7 @@ public sealed class TranscriptionPipeline
                 resultPath,
                 jobDirectory,
                 runLabel,
-                GetVulkanContextTokenCap(TimeSpan.FromMilliseconds(chunk.DurationMs)),
+                GetVulkanContextTokenCap(TimeSpan.FromMilliseconds(chunk.DurationMs), gpuProfile),
                 progress,
                 diagnostics,
                 cancellationToken).ConfigureAwait(false);
@@ -720,73 +790,59 @@ public sealed class TranscriptionPipeline
         return new EngineRunOutcome(result.Elapsed);
     }
 
-    private QwenRuntime? ResolveQwenRuntime(TranscriptionMode mode, string? requestedApiKey)
+    private QwenRuntime? ResolveQwenRuntime(TranscriptionMode mode)
     {
-        if (mode == TranscriptionMode.MossLocalFast)
+        if (mode != TranscriptionMode.QwenLocalHighAccuracy)
         {
             return null;
         }
 
         var pythonPath = _runtimeLocator.FindQwenPython();
         var sidecarPath = _runtimeLocator.FindQwenSidecar();
-        if (mode == TranscriptionMode.QwenLocalHighAccuracy)
+        return new QwenRuntime(
+            pythonPath,
+            sidecarPath,
+            _runtimeLocator.FindQwenAsrModelDirectory(),
+            _runtimeLocator.FindQwenAlignerModelDirectory());
+    }
+
+    private WhisperRuntime? ResolveWhisperRuntime(TranscriptionMode mode)
+    {
+        if (mode != TranscriptionMode.WhisperTurboFast)
         {
-            return new QwenRuntime(
-                pythonPath,
-                sidecarPath,
-                _runtimeLocator.FindQwenAsrModelDirectory(),
-                _runtimeLocator.FindQwenAlignerModelDirectory(),
-                null);
+            return null;
         }
 
-        var apiKey = string.IsNullOrWhiteSpace(requestedApiKey)
-            ? Environment.GetEnvironmentVariable("DASHSCOPE_API_KEY")
-            : requestedApiKey;
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new InvalidOperationException(
-                "SDK 高精度模式需要阿里云 Model Studio API Key。" +
-                "请在界面中临时输入，或在 Windows 用户环境变量 DASHSCOPE_API_KEY 中配置。");
-        }
-
-        return new QwenRuntime(pythonPath, sidecarPath, null, null, apiKey.Trim());
+        return new WhisperRuntime(
+            _runtimeLocator.FindWhisperPython(),
+            _runtimeLocator.FindWhisperSidecar(),
+            _runtimeLocator.FindWhisperModelDirectory());
     }
 
     private async Task<EngineRunOutcome> RunQwenAsync(
-        TranscriptionMode mode,
         QwenRuntime runtime,
         LanguageSelection languageSelection,
         string wavPath,
         string resultPath,
-        string mossResultPath,
+        int chunkSeconds,
         string jobDirectory,
         IProgress<OperationProgress>? progress,
         IProgress<string>? diagnostics,
         CancellationToken cancellationToken)
     {
-        var isLocal = mode == TranscriptionMode.QwenLocalHighAccuracy;
         progress?.Report(new OperationProgress(
             JobState.Transcribing,
-            isLocal
-                ? "正在用本地 Qwen3-ASR-1.7B 高精度识别…"
-                : "正在通过 Qwen SDK 高精度识别…"));
+            "正在用 Windows CUDA / 标准 PyTorch 运行本地 Qwen3-ASR 高精度识别…"));
 
         var environment = new Dictionary<string, string?>
         {
             ["PYTHONUTF8"] = "1",
             ["PYTHONIOENCODING"] = "utf-8",
         };
-        if (isLocal)
-        {
-            // The local mode is intentionally strict: no silent network fallback
-            // after installation, even if a Hugging Face token is available.
-            environment["HF_HUB_OFFLINE"] = "1";
-            environment["TRANSFORMERS_OFFLINE"] = "1";
-        }
-        else
-        {
-            environment["DASHSCOPE_API_KEY"] = runtime.ApiKey;
-        }
+        // The local mode is intentionally strict: no silent network fallback
+        // after installation, even if a Hugging Face token is available.
+        environment["HF_HUB_OFFLINE"] = "1";
+        environment["TRANSFORMERS_OFFLINE"] = "1";
 
         string? lastProgressMessage = null;
         double? lastProgressFraction = null;
@@ -796,14 +852,13 @@ public sealed class TranscriptionPipeline
                 FileName = runtime.PythonPath,
                 WorkingDirectory = Path.GetDirectoryName(runtime.SidecarPath),
                 Arguments = BuildQwenArguments(
-                    mode,
                     runtime.SidecarPath,
                     runtime.AsrModelDirectory,
                     runtime.AlignerModelDirectory,
                     wavPath,
                     resultPath,
-                    mossResultPath,
-                    languageSelection),
+                    languageSelection,
+                    chunkSeconds),
                 EnvironmentVariables = environment,
                 StandardOutputLogPath = Path.Combine(jobDirectory, "qwen.stdout.log"),
                 StandardErrorLogPath = Path.Combine(jobDirectory, "qwen.stderr.log"),
@@ -847,20 +902,195 @@ public sealed class TranscriptionPipeline
         return new EngineRunOutcome(result.Elapsed);
     }
 
-    internal static IReadOnlyList<string> BuildQwenArguments(
-        TranscriptionMode mode,
-        string sidecarPath,
-        string? asrModelDirectory,
-        string? alignerModelDirectory,
+    private async Task<EngineRunOutcome> RunWhisperAsync(
+        WhisperRuntime runtime,
+        LanguageSelection languageSelection,
         string wavPath,
         string resultPath,
-        string? speakerTimelinePath,
-        LanguageSelection languageSelection)
+        GpuExecutionProfile gpuProfile,
+        string jobDirectory,
+        IProgress<OperationProgress>? progress,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await RunWhisperAttemptAsync(
+                runtime,
+                languageSelection,
+                wavPath,
+                resultPath,
+                "cuda",
+                "int8_float16",
+                gpuProfile.WhisperBatchSize,
+                jobDirectory,
+                progress,
+                diagnostics,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException gpuException) when (!cancellationToken.IsCancellationRequested)
+        {
+            diagnostics?.Report(
+                "Faster-Whisper Windows CUDA 未能完成；正在自动改用 CPU int8。" +
+                $" 原因：{gpuException.Message}");
+            TryDelete(resultPath);
+            TryDelete(resultPath + ".tmp");
+            progress?.Report(new OperationProgress(
+                JobState.ReadyToTranscribe,
+                "Whisper CUDA 不可用，正在改用 CPU；剩余时间将重新估算。",
+                0));
+            return await RunWhisperAttemptAsync(
+                runtime,
+                languageSelection,
+                wavPath,
+                resultPath,
+                "cpu",
+                "int8",
+                1,
+                jobDirectory,
+                progress,
+                diagnostics,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<EngineRunOutcome> RunWhisperAttemptAsync(
+        WhisperRuntime runtime,
+        LanguageSelection languageSelection,
+        string wavPath,
+        string resultPath,
+        string device,
+        string computeType,
+        int batchSize,
+        string jobDirectory,
+        IProgress<OperationProgress>? progress,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
+        progress?.Report(new OperationProgress(
+            JobState.Transcribing,
+            device == "cuda"
+                ? "正在用 Faster-Whisper / Windows CUDA 识别语音…"
+                : "正在用 Faster-Whisper CPU 识别语音，速度会慢一些…",
+            0));
+        var environment = new Dictionary<string, string?>
+        {
+            ["PYTHONUTF8"] = "1",
+            ["PYTHONIOENCODING"] = "utf-8",
+            ["HF_HUB_OFFLINE"] = "1",
+            ["HF_HUB_DISABLE_TELEMETRY"] = "1",
+            ["DO_NOT_TRACK"] = "1",
+        };
+        string? lastProgressMessage = null;
+        double? lastProgressFraction = null;
+        var result = await _processRunner.RunAsync(
+            new ProcessSpec
+            {
+                FileName = runtime.PythonPath,
+                WorkingDirectory = Path.GetDirectoryName(runtime.SidecarPath),
+                Arguments = BuildWhisperArguments(
+                    runtime.SidecarPath,
+                    runtime.ModelDirectory,
+                    wavPath,
+                    resultPath,
+                    languageSelection,
+                    device,
+                    computeType,
+                    batchSize),
+                EnvironmentVariables = environment,
+                StandardOutputLogPath = Path.Combine(jobDirectory, $"whisper-{device}.stdout.log"),
+                StandardErrorLogPath = Path.Combine(jobDirectory, $"whisper-{device}.stderr.log"),
+            },
+            onStandardError: line =>
+            {
+                var engineEvent = TryParseEngineEvent(line);
+                if (engineEvent is not { Type: "progress" } || string.IsNullOrWhiteSpace(engineEvent.Message))
+                {
+                    return;
+                }
+                if (string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal) &&
+                    Nullable.Equals(lastProgressFraction, engineEvent.Fraction))
+                {
+                    return;
+                }
+                lastProgressMessage = engineEvent.Message;
+                lastProgressFraction = engineEvent.Fraction;
+                progress?.Report(new OperationProgress(
+                    JobState.Transcribing,
+                    engineEvent.Message.Trim(),
+                    engineEvent.Fraction));
+            },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Faster-Whisper {device} 推理失败：{ExtractEngineError(result.StandardErrorTail)} " +
+                $"诊断文件保存在：{jobDirectory}");
+        }
+        if (!File.Exists(resultPath) || new FileInfo(resultPath).Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Faster-Whisper {device} 已结束但没有生成结果文件。诊断文件保存在：{jobDirectory}");
+        }
+        return new EngineRunOutcome(result.Elapsed);
+    }
+
+    internal static IReadOnlyList<string> BuildWhisperArguments(
+        string sidecarPath,
+        string modelDirectory,
+        string wavPath,
+        string resultPath,
+        LanguageSelection languageSelection,
+        string device,
+        string computeType,
+        int batchSize)
     {
         ArgumentNullException.ThrowIfNull(languageSelection);
-        if (mode is not (TranscriptionMode.QwenLocalHighAccuracy or TranscriptionMode.QwenSdkHighAccuracy))
+        ArgumentException.ThrowIfNullOrWhiteSpace(sidecarPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelDirectory);
+        if (device is not ("cuda" or "cpu"))
         {
-            throw new ArgumentOutOfRangeException(nameof(mode), "Qwen 参数只适用于高精度模式。");
+            throw new ArgumentOutOfRangeException(nameof(device));
+        }
+        if ((device == "cuda" && computeType != "int8_float16") ||
+            (device == "cpu" && computeType != "int8"))
+        {
+            throw new ArgumentException("Whisper 后端与计算类型不匹配。", nameof(computeType));
+        }
+        if (batchSize is < 1 or > 32)
+        {
+            throw new ArgumentOutOfRangeException(nameof(batchSize));
+        }
+        return
+        [
+            "-X", "utf8",
+            "-I", sidecarPath,
+            "--audio", wavPath,
+            "--output", resultPath,
+            "--model-dir", modelDirectory,
+            "--language", languageSelection.EngineArgument,
+            "--device", device,
+            "--compute-type", computeType,
+            "--batch-size", batchSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        ];
+    }
+
+    internal static IReadOnlyList<string> BuildQwenArguments(
+        string sidecarPath,
+        string asrModelDirectory,
+        string alignerModelDirectory,
+        string wavPath,
+        string resultPath,
+        LanguageSelection languageSelection,
+        int chunkSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(languageSelection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sidecarPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(asrModelDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(alignerModelDirectory);
+        if (chunkSeconds is < 30 or > 180)
+        {
+            throw new ArgumentOutOfRangeException(nameof(chunkSeconds), "Qwen 音频分块必须在 30–180 秒之间。");
         }
 
         var arguments = new List<string>
@@ -868,104 +1098,72 @@ public sealed class TranscriptionPipeline
             "-X", "utf8",
             "-I",
             sidecarPath,
-            "--mode", mode == TranscriptionMode.QwenLocalHighAccuracy ? "local" : "sdk",
+            "--mode", "local",
             "--audio", wavPath,
             "--output", resultPath,
             "--language", languageSelection.EngineArgument,
+            "--model-dir", asrModelDirectory,
+            "--aligner-dir", alignerModelDirectory,
+            "--device", "auto",
+            "--chunk-seconds", chunkSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
-
-        if (mode == TranscriptionMode.QwenLocalHighAccuracy)
-        {
-            if (string.IsNullOrWhiteSpace(asrModelDirectory) || string.IsNullOrWhiteSpace(alignerModelDirectory))
-            {
-                throw new ArgumentException("本地 Qwen 模式需要 ASR 和强制对齐模型目录。");
-            }
-
-            arguments.AddRange(
-            [
-                "--model-dir", asrModelDirectory,
-                "--aligner-dir", alignerModelDirectory,
-                "--device", "auto",
-            ]);
-        }
-        else
-        {
-            if (string.IsNullOrWhiteSpace(speakerTimelinePath))
-            {
-                throw new ArgumentException("SDK Qwen 模式需要 MOSS 说话人时间轴。");
-            }
-
-            arguments.AddRange(
-            [
-                "--sdk-model", "qwen3-asr-flash",
-                "--speaker-timeline", speakerTimelinePath,
-            ]);
-        }
-
         return arguments;
     }
 
-    private static EngineResultDto MergeHighAccuracyResults(
-        TranscriptionMode mode,
-        EngineResultDto qwenResult,
-        EngineResultDto mossResult)
+    private static EngineResultDto MergeRecognitionWithOptionalMoss(
+        EngineResultDto recognitionResult,
+        EngineResultDto? mossResult,
+        string speakerEnabledWarning,
+        string speakerDisabledWarning)
     {
-        if (qwenResult.Segments is null)
+        if (recognitionResult.Segments is null)
         {
-            throw new InvalidDataException("Qwen 识别结果没有 segments 字段。");
+            throw new InvalidDataException("识别结果没有 segments 字段。");
+        }
+
+        var warnings = new List<string>();
+        if (recognitionResult.Warnings is not null)
+        {
+            warnings.AddRange(recognitionResult.Warnings);
+        }
+
+        if (mossResult is null)
+        {
+            warnings.Add(speakerDisabledWarning);
+            return recognitionResult with
+            {
+                Warnings = warnings.Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.Ordinal).ToArray(),
+            };
         }
 
         if (mossResult.Segments is null)
         {
             throw new InvalidDataException("MOSS 说话人结果没有 segments 字段。");
         }
-
-        var mergedSegments = TimelineSpeakerMerger.Merge(qwenResult.Segments, mossResult.Segments)
-            .Select(segment => new EngineSegmentDto(
-                segment.StartMs,
-                segment.EndMs,
-                segment.SpeakerId,
-                segment.Text))
-            .ToArray();
-        var warnings = new List<string>();
-        if (qwenResult.Warnings is not null)
-        {
-            warnings.AddRange(qwenResult.Warnings);
-        }
-
         if (mossResult.Warnings is not null)
         {
             warnings.AddRange(mossResult.Warnings);
         }
-
-        warnings.Add(mode == TranscriptionMode.QwenSdkHighAccuracy
-            ? "Qwen 云端生成文字；时间轴是本地 VAD 按 MOSS 说话人边界切出的分段边界，不是云端逐词时间戳。"
-            : "Qwen 本地模型生成文字与逐词对齐；说话人标签来自本地 MOSS 轨道并按时间重叠合并。");
+        warnings.Add(speakerEnabledWarning);
+        var mergedSegments = TimelineSpeakerMerger.Merge(recognitionResult.Segments, mossResult.Segments)
+            .Select(segment => new EngineSegmentDto(segment.StartMs, segment.EndMs, segment.SpeakerId, segment.Text))
+            .ToArray();
         return new EngineResultDto(
-            qwenResult.SourceFileName,
-            qwenResult.DurationMs > 0 ? qwenResult.DurationMs : mossResult.DurationMs,
-            qwenResult.Model,
-            $"{qwenResult.EngineVersion} + MOSS {mossResult.EngineVersion}",
-            $"Qwen {qwenResult.Backend} + MOSS {mossResult.Backend}",
-            qwenResult.Language,
-            qwenResult.FullText,
-            qwenResult.RawText,
+            recognitionResult.SourceFileName,
+            recognitionResult.DurationMs > 0 ? recognitionResult.DurationMs : mossResult.DurationMs,
+            recognitionResult.Model,
+            $"{recognitionResult.EngineVersion} + MOSS {mossResult.EngineVersion}",
+            $"{recognitionResult.Backend} + MOSS {mossResult.Backend}",
+            recognitionResult.Language,
+            recognitionResult.FullText,
+            recognitionResult.RawText,
             mergedSegments,
             warnings.Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.Ordinal).ToArray(),
-            qwenResult.IsPartial || mossResult.IsPartial);
+            recognitionResult.IsPartial || mossResult.IsPartial);
     }
 
-    private static (string Name, string Revision) GetHighAccuracyModelIdentity(TranscriptionMode mode) =>
-        mode switch
-        {
-            TranscriptionMode.QwenLocalHighAccuracy => (
-                QwenLocalDisplayName,
-                $"ASR {QwenModelManifest.AsrRevision}; Aligner {QwenModelManifest.AlignerRevision}; MOSS {ModelStore.MossQ8.Revision}"),
-            TranscriptionMode.QwenSdkHighAccuracy => (
-                QwenSdkDisplayName,
-                $"Qwen SDK service-managed; MOSS {ModelStore.MossQ8.Revision}"),
-            _ => throw new ArgumentOutOfRangeException(nameof(mode)),
-        };
+    private static (string Name, string Revision) GetHighAccuracyModelIdentity() =>
+        (QwenLocalDisplayName, $"ASR {QwenModelManifest.AsrRevision}; Aligner {QwenModelManifest.AlignerRevision}");
 
     internal static IReadOnlyList<string> BuildEngineArguments(
         string runtimeDirectory,
@@ -1005,9 +1203,19 @@ public sealed class TranscriptionPipeline
     }
 
     internal static int? GetVulkanContextTokenCap(TimeSpan mediaDuration) =>
-        mediaDuration > TimeSpan.Zero && mediaDuration <= VulkanProtectedContextMaximumDuration
-            ? VulkanProtectedContextTokens
+        GetVulkanContextTokenCap(
+            mediaDuration,
+            GpuExecutionProfile.FromMemory("默认保守配置", 6_144, isDetected: false));
+
+    internal static int? GetVulkanContextTokenCap(
+        TimeSpan mediaDuration,
+        GpuExecutionProfile gpuProfile)
+    {
+        ArgumentNullException.ThrowIfNull(gpuProfile);
+        return mediaDuration > TimeSpan.Zero && mediaDuration <= VulkanProtectedContextMaximumDuration
+            ? gpuProfile.MossContextTokens
             : null;
+    }
 
     internal static TimeSpan GetEffectiveMediaDuration(
         TimeSpan probedMediaDuration,
@@ -1371,9 +1579,12 @@ public sealed class TranscriptionPipeline
     private sealed record QwenRuntime(
         string PythonPath,
         string SidecarPath,
-        string? AsrModelDirectory,
-        string? AlignerModelDirectory,
-        string? ApiKey);
+        string AsrModelDirectory,
+        string AlignerModelDirectory);
+    private sealed record WhisperRuntime(
+        string PythonPath,
+        string SidecarPath,
+        string ModelDirectory);
 
     private sealed class EngineRunException(string message, int exitCode) : Exception(message)
     {

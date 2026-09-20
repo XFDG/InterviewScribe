@@ -41,7 +41,7 @@ public sealed class ModelStore : IDisposable
         _retryDelay = retryDelay;
         var assemblyVersion = typeof(ModelStore).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         _httpClient.DefaultRequestHeaders.UserAgent.Add(
-            new ProductInfoHeaderValue("InterviewScribe", assemblyVersion));
+            new ProductInfoHeaderValue("MediaScribe", assemblyVersion));
     }
 
     public async Task<string> EnsureAsync(

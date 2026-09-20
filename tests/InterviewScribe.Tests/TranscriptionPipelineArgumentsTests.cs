@@ -54,14 +54,13 @@ public sealed class TranscriptionPipelineArgumentsTests
     public void BuildQwenArguments_LocalMode_PreservesSupportedExtendedLanguage(string languageCode)
     {
         var arguments = TranscriptionPipeline.BuildQwenArguments(
-            TranscriptionMode.QwenLocalHighAccuracy,
             "qwen_sidecar.py",
             "asr-model",
             "aligner-model",
             "audio.wav",
             "result.json",
-            null,
-            LanguageSelection.FromCodes([languageCode]));
+            LanguageSelection.FromCodes([languageCode]),
+            90);
 
         var languageIndex = Array.IndexOf(arguments.ToArray(), "--language");
         Assert.True(languageIndex >= 0);
@@ -90,7 +89,7 @@ public sealed class TranscriptionPipelineArgumentsTests
             language);
 
         Assert.Contains("--context-tokens", vulkanArguments);
-        Assert.Contains("32768", vulkanArguments);
+        Assert.Contains("16384", vulkanArguments);
         Assert.DoesNotContain("--context-tokens", cpuArguments);
     }
 
@@ -118,26 +117,25 @@ public sealed class TranscriptionPipelineArgumentsTests
     }
 
     [Fact]
-    public void GetEffectiveMediaDuration_RejectsExtractedAudioOverTwoHours()
+    public void GetEffectiveMediaDuration_RejectsExtractedAudioOverEightHours()
     {
         Assert.Throws<NotSupportedException>(() =>
             TranscriptionPipeline.GetEffectiveMediaDuration(
                 TimeSpan.FromHours(1),
-                TimeSpan.FromHours(2) + TimeSpan.FromMilliseconds(1)));
+                TimeSpan.FromHours(8) + TimeSpan.FromMilliseconds(1)));
     }
 
     [Fact]
     public void BuildQwenArguments_LocalMode_UsesPinnedLocalDirectoriesAndAutoLanguage()
     {
         var arguments = TranscriptionPipeline.BuildQwenArguments(
-            TranscriptionMode.QwenLocalHighAccuracy,
             "qwen_sidecar.py",
             "asr-model",
             "aligner-model",
             "audio.wav",
             "result.json",
-            null,
-            LanguageSelection.FromCodes(["zh", "en"]));
+            LanguageSelection.FromCodes(["zh", "en"]),
+            90);
 
         Assert.Equal(
             [
@@ -150,54 +148,67 @@ public sealed class TranscriptionPipelineArgumentsTests
                 "--model-dir", "asr-model",
                 "--aligner-dir", "aligner-model",
                 "--device", "auto",
+                "--chunk-seconds", "90",
             ],
             arguments);
     }
 
     [Fact]
-    public void BuildQwenArguments_SdkMode_DoesNotPutSecretOrLocalPathsOnCommandLine()
+    public void BuildQwenArguments_RejectsUnsafeChunkLength()
     {
-        var arguments = TranscriptionPipeline.BuildQwenArguments(
-            TranscriptionMode.QwenSdkHighAccuracy,
-            "qwen_sidecar.py",
-            null,
-            null,
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            TranscriptionPipeline.BuildQwenArguments(
+                "qwen_sidecar.py",
+                "asr-model",
+                "aligner-model",
+                "audio.wav",
+                "result.json",
+                LanguageSelection.FromCodes(["en"]),
+                29));
+    }
+
+    [Fact]
+    public void BuildWhisperArguments_UsesIsolatedLocalCudaContract()
+    {
+        var arguments = TranscriptionPipeline.BuildWhisperArguments(
+            "whisper_sidecar.py",
+            "whisper-model",
             "audio.wav",
             "result.json",
-            "moss-result.json",
-            LanguageSelection.FromCodes(["en"]));
+            LanguageSelection.FromCodes(["zh", "en"]),
+            "cuda",
+            "int8_float16",
+            3);
 
         Assert.Equal(
             [
                 "-X", "utf8",
-                "-I", "qwen_sidecar.py",
-                "--mode", "sdk",
+                "-I", "whisper_sidecar.py",
                 "--audio", "audio.wav",
                 "--output", "result.json",
-                "--language", "en",
-                "--sdk-model", "qwen3-asr-flash",
-                "--speaker-timeline", "moss-result.json",
+                "--model-dir", "whisper-model",
+                "--language", "auto",
+                "--device", "cuda",
+                "--compute-type", "int8_float16",
+                "--batch-size", "3",
             ],
             arguments);
-        Assert.DoesNotContain(arguments, item => item.Contains("key", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain("--model-dir", arguments);
-        Assert.DoesNotContain("--aligner-dir", arguments);
     }
 
-    [Fact]
-    public void BuildQwenArguments_SdkMode_RequiresSpeakerTimeline()
+    [Theory]
+    [InlineData(8_151, 16_384, 75, 3)]
+    [InlineData(12_000, 32_768, 150, 6)]
+    [InlineData(24_000, 49_152, 180, 8)]
+    public void GpuExecutionProfile_UsesConservativeMemoryAwareCaps(
+        int memoryMiB,
+        int expectedContext,
+        int expectedQwenSeconds,
+        int expectedWhisperBatch)
     {
-        var exception = Assert.Throws<ArgumentException>(() =>
-            TranscriptionPipeline.BuildQwenArguments(
-                TranscriptionMode.QwenSdkHighAccuracy,
-                "qwen_sidecar.py",
-                null,
-                null,
-                "audio.wav",
-                "result.json",
-                null,
-                LanguageSelection.FromCodes(["zh"])));
+        var profile = GpuExecutionProfile.FromMemory("test GPU", memoryMiB);
 
-        Assert.Contains("MOSS", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(expectedContext, profile.MossContextTokens);
+        Assert.Equal(expectedQwenSeconds, profile.QwenChunkSeconds);
+        Assert.Equal(expectedWhisperBatch, profile.WhisperBatchSize);
     }
 }

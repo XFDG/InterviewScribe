@@ -30,12 +30,12 @@ try {
         }
     }
     catch [System.UnauthorizedAccessException] {
-        throw "Cannot access the system-wide Qwen installer lock. Close any other InterviewScribe installer, then try again."
+        throw "Cannot access the system-wide Qwen installer lock. Close any other MediaScribe installer, then try again."
     }
 
     if (-not $InstallerMutexOwned) {
         [Console]::Error.WriteLine(
-            "INTERVIEWSCRIBE_INSTALL_ALREADY_RUNNING: Another InterviewScribe Qwen component installation is already running. Wait for it to finish before trying again."
+            "INTERVIEWSCRIBE_INSTALL_ALREADY_RUNNING: Another MediaScribe Qwen component installation is already running. Wait for it to finish before trying again."
         )
         exit $InstallerAlreadyRunningExitCode
     }
@@ -425,7 +425,7 @@ if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
 }
 elseif (-not (Test-CompatiblePython -PythonPath $PythonExe)) {
     throw (
-        "The existing InterviewScribe Qwen environment is not 64-bit CPython 3.11 or 3.12: $PythonExe. " +
+        "The existing MediaScribe Qwen environment is not 64-bit CPython 3.11 or 3.12: $PythonExe. " +
         "Remove that application-specific environment, then run this installer again."
     )
 }

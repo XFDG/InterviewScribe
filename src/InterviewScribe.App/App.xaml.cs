@@ -5,7 +5,7 @@ namespace InterviewScribe.App;
 
 public partial class App : Application
 {
-    private const string SingleInstanceName = @"Local\InterviewScribe.SingleInstance";
+    private const string SingleInstanceName = @"Local\MediaScribe.SingleInstance";
     private Mutex? _singleInstanceMutex;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -14,8 +14,8 @@ public partial class App : Application
         if (!isFirstInstance)
         {
             MessageBox.Show(
-                "面试转写助手已经在运行。请切换到现有窗口继续操作。",
-                "面试转写助手",
+                "MediaScribe 已经在运行。请切换到现有窗口继续操作。",
+                "MediaScribe",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
             Shutdown();

@@ -18,6 +18,9 @@ public sealed class AppPaths
     public string RuntimeRoot => Path.Combine(LocalRoot, "runtime");
     public string QwenRuntimeRoot => Path.Combine(LocalRoot, "qwen-runtime");
     public string QwenVirtualEnvironmentRoot => Path.Combine(QwenRuntimeRoot, ".venv");
+    public string WhisperRuntimeRoot => Path.Combine(LocalRoot, "whisper-runtime");
+    public string WhisperVirtualEnvironmentRoot => Path.Combine(WhisperRuntimeRoot, ".venv");
+    public string WhisperModelRoot => Path.Combine(ModelsRoot, "Whisper-large-v3-turbo-ct2");
     // Qwen officially recommends ModelScope for downloads in Mainland China.
     // Keeping its snapshots separate from the MOSS GGUF store also lets the
     // installer adopt a manually completed official ModelScope download without
@@ -35,6 +38,7 @@ public sealed class AppPaths
         Directory.CreateDirectory(LogsRoot);
         Directory.CreateDirectory(RuntimeRoot);
         Directory.CreateDirectory(QwenRuntimeRoot);
+        Directory.CreateDirectory(WhisperRuntimeRoot);
     }
 
     public string CreateJobDirectory()

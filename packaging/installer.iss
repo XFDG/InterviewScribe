@@ -1,25 +1,25 @@
 ﻿#ifndef MyAppVersion
-  #define MyAppVersion "0.4.1"
+  #define MyAppVersion "0.5.0"
 #endif
 #ifndef SourceDir
-  #define SourceDir "..\artifacts\package\InterviewScribe"
+  #define SourceDir "..\artifacts\package\MediaScribe"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\artifacts\release"
 #endif
 #ifndef AppExeName
-  #define AppExeName "InterviewScribe.App.exe"
+  #define AppExeName "MediaScribe.exe"
 #endif
 
-#define MyAppName "InterviewScribe 面试转写助手"
-#define MyAppPublisher "InterviewScribe Contributors"
+#define MyAppName "MediaScribe 媒体转写助手"
+#define MyAppPublisher "MediaScribe Contributors"
 
 [Setup]
 AppId={{8D659C29-65C6-4F17-956D-E082B92D911A}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Programs\InterviewScribe
+DefaultDirName={localappdata}\Programs\MediaScribe
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -27,14 +27,14 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir={#OutputDir}
-OutputBaseFilename=InterviewScribe-Setup-x64
+OutputBaseFilename=MediaScribe-Setup-x64
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
-SetupIconFile={#SourceDir}\Assets\InterviewScribe.ico
+SetupIconFile={#SourceDir}\Assets\MediaScribe.ico
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
@@ -55,8 +55,8 @@ Name: "desktopicon"; Description: "{cm:DesktopShortcutTask}"; GroupDescription: 
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\InterviewScribe.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\InterviewScribe.ico"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\MediaScribe.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\MediaScribe.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

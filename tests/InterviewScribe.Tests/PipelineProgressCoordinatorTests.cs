@@ -40,7 +40,8 @@ public sealed class PipelineProgressCoordinatorTests
         var snapshots = new List<OperationProgress>();
         var coordinator = new PipelineProgressCoordinator(
             TranscriptionMode.QwenLocalHighAccuracy,
-            new CollectingProgress(snapshots));
+            usesMoss: true,
+            target: new CollectingProgress(snapshots));
 
         coordinator.Report(PipelinePhase.MossDiarization, JobState.Transcribing, "moss", 1);
         coordinator.Report(PipelinePhase.QwenRecognition, JobState.Transcribing, "qwen start", 0);
@@ -51,6 +52,24 @@ public sealed class PipelineProgressCoordinatorTests
         Assert.Equal(0.48, snapshots[1].Fraction!.Value, 3);
         Assert.Equal(0.71, snapshots[2].Fraction!.Value, 3);
         Assert.Equal(0.94, snapshots[3].Fraction!.Value, 3);
+    }
+
+    [Fact]
+    public void WhisperFastModeWithoutSpeakerPass_GivesRecognitionTheFullRecognitionRange()
+    {
+        var snapshots = new List<OperationProgress>();
+        var coordinator = new PipelineProgressCoordinator(
+            TranscriptionMode.WhisperTurboFast,
+            usesMoss: false,
+            target: new CollectingProgress(snapshots));
+
+        coordinator.Report(PipelinePhase.QwenRecognition, JobState.Transcribing, "whisper start", 0);
+        coordinator.Report(PipelinePhase.QwenRecognition, JobState.Transcribing, "whisper half", 0.5);
+        coordinator.Report(PipelinePhase.QwenRecognition, JobState.Transcribing, "whisper done", 1);
+
+        Assert.Equal(0.20, snapshots[0].Fraction!.Value, 3);
+        Assert.Equal(0.57, snapshots[1].Fraction!.Value, 3);
+        Assert.Equal(0.94, snapshots[2].Fraction!.Value, 3);
     }
 
     [Theory]
