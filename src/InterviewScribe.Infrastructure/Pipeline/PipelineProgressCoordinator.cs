@@ -18,6 +18,8 @@ internal sealed class PipelineProgressCoordinator
     private double? _phaseStartOverall;
     private TimeSpan _phaseStartElapsed;
     private double? _smoothedEtaSeconds;
+    private PipelinePhase? _retryPhase;
+    private double? _retryStartOverall;
 
     public PipelineProgressCoordinator(
         TranscriptionMode mode,
@@ -55,6 +57,14 @@ internal sealed class PipelineProgressCoordinator
             var elapsed = _stopwatch.Elapsed;
             var normalizedPhaseFraction = NormalizeFraction(phaseFraction);
             var (start, end) = GetRange(phase);
+            if (_retryPhase == phase && _retryStartOverall is double retryStart)
+            {
+                // A context retry reruns work that has already been reflected in
+                // the UI percentage. Keep the percentage monotonic, but remap the
+                // new plan over the remaining part of this phase so it moves again
+                // instead of staying frozen until it catches up to the failed plan.
+                start = Math.Clamp(Math.Max(start, retryStart), start, end);
+            }
             var mapped = normalizedPhaseFraction is double local
                 ? start + ((end - start) * local)
                 : start;
@@ -68,6 +78,8 @@ internal sealed class PipelineProgressCoordinator
                 _phaseStartOverall = overall;
                 _phaseStartElapsed = elapsed;
                 _smoothedEtaSeconds = null;
+                _retryPhase = null;
+                _retryStartOverall = null;
             }
 
             _lastOverallFraction = overall;
@@ -80,6 +92,12 @@ internal sealed class PipelineProgressCoordinator
                 eta,
                 phase,
                 normalizedPhaseFraction);
+
+            if (_retryPhase == phase && normalizedPhaseFraction >= 1)
+            {
+                _retryPhase = null;
+                _retryStartOverall = null;
+            }
         }
 
         _target?.Report(snapshot);
@@ -89,6 +107,24 @@ internal sealed class PipelineProgressCoordinator
     {
         lock (_gate)
         {
+            _phaseStartOverall = _lastOverallFraction;
+            _phaseStartElapsed = _stopwatch.Elapsed;
+            _smoothedEtaSeconds = null;
+        }
+    }
+
+    /// <summary>
+    /// Restarts a phase after a recoverable GPU retry without moving the visible
+    /// percentage backwards.  The retried work is mapped over the remainder of
+    /// the phase and receives a fresh ETA baseline.
+    /// </summary>
+    public void BeginPhaseRetry(PipelinePhase phase)
+    {
+        lock (_gate)
+        {
+            var (start, end) = GetRange(phase);
+            _retryPhase = phase;
+            _retryStartOverall = Math.Clamp(_lastOverallFraction, start, end);
             _phaseStartOverall = _lastOverallFraction;
             _phaseStartElapsed = _stopwatch.Elapsed;
             _smoothedEtaSeconds = null;

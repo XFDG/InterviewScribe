@@ -55,6 +55,27 @@ public sealed class PipelineProgressCoordinatorTests
     }
 
     [Fact]
+    public void MossGpuContextRetry_RemapsTheNewPlanAcrossTheRemainingPhase()
+    {
+        var snapshots = new List<OperationProgress>();
+        var coordinator = new PipelineProgressCoordinator(
+            TranscriptionMode.WhisperTurboFast,
+            usesMoss: true,
+            target: new CollectingProgress(snapshots));
+
+        coordinator.Report(PipelinePhase.MossDiarization, JobState.Transcribing, "first plan", 0.5);
+        coordinator.BeginPhaseRetry(PipelinePhase.MossDiarization);
+        coordinator.Report(PipelinePhase.MossDiarization, JobState.ReadyToTranscribe, "retry start", 0);
+        coordinator.Report(PipelinePhase.MossDiarization, JobState.Transcribing, "retry half", 0.5);
+        coordinator.Report(PipelinePhase.MossDiarization, JobState.Transcribing, "retry done", 1);
+
+        Assert.Equal(0.34, snapshots[0].Fraction!.Value, 3);
+        Assert.Equal(0.34, snapshots[1].Fraction!.Value, 3);
+        Assert.Equal(0.41, snapshots[2].Fraction!.Value, 3);
+        Assert.Equal(0.48, snapshots[3].Fraction!.Value, 3);
+    }
+
+    [Fact]
     public void WhisperFastModeWithoutSpeakerPass_GivesRecognitionTheFullRecognitionRange()
     {
         var snapshots = new List<OperationProgress>();

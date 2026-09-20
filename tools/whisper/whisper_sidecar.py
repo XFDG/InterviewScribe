@@ -202,7 +202,8 @@ def _run(args: argparse.Namespace, audio: Path, duration_ms: int) -> dict[str, A
             ) from exc
         raise UserFacingError(f"无法加载 Faster-Whisper 模型：{detail}") from exc
 
-    _progress("已加载 Whisper；正在使用 VAD 和批量 CUDA 推理…", 0.10)
+    backend_label = "Windows CUDA GPU" if device == "cuda" else "CPU"
+    _progress(f"已加载 Whisper；正在使用 VAD 和批量 {backend_label} 推理…", 0.10)
     pipeline = BatchedInferencePipeline(model)
     language = None if args.language == "auto" else args.language
     try:

@@ -15,6 +15,29 @@ public sealed class MossChunkingTests
     }
 
     [Fact]
+    public void Planner_GpuContextLimit_SplitsTwentyFourMinuteRecordingBeforeItCanFallBackToCpu()
+    {
+        var gpuSafeMaximum = MossChunkPlanner.GetGpuSafeMaximumChunkDuration(16_384);
+        var duration = TimeSpan.FromMinutes(24) + TimeSpan.FromSeconds(10);
+
+        var chunks = MossChunkPlanner.Create(duration, gpuSafeMaximum);
+
+        Assert.Equal(TimeSpan.FromSeconds(1_024), gpuSafeMaximum);
+        Assert.Equal(2, chunks.Count);
+        Assert.Equal(0, chunks[0].StartMs);
+        Assert.Equal((long)duration.TotalMilliseconds, chunks[^1].EndMs);
+        Assert.All(chunks, chunk => Assert.True(chunk.DurationMs <= gpuSafeMaximum.TotalMilliseconds));
+    }
+
+    [Fact]
+    public void Planner_GpuContextLimit_NeverExceedsNativeHardLimit()
+    {
+        var maximum = MossChunkPlanner.GetGpuSafeMaximumChunkDuration(65_536);
+
+        Assert.Equal(MossChunkPlanner.MaximumChunkDuration, maximum);
+    }
+
+    [Fact]
     public void Planner_LongRecording_CoversWholeTimelineWithBoundedOverlappingChunks()
     {
         var duration = TimeSpan.FromMinutes(55);

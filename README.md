@@ -17,7 +17,7 @@ MediaScribe 是一个面向 Windows 10/11 x64 的本地媒体转写 GUI。把已
 | 模式 | 文字与时间轴 | 说话人 | 设备策略 | 适合什么情况 |
 | --- | --- | --- | --- | --- |
 | **Whisper Turbo 快速模式（默认推荐）** | `faster-whisper-large-v3-turbo` | 可选：再跑一次 MOSS | Windows 原生 CUDA 优先，`int8_float16`；失败时 CPU `int8` | 希望速度接近 Buzz，同时保留本地时间轴 |
-| **MOSS 本地兼容模式** | `MOSS-Transcribe-Diarize-Q8` 一次生成 | 内建 | Vulkan GPU 优先；单段失败才回退 CPU | 希望沿用已有 MOSS 工作流或直接得到说话人轨道 |
+| **MOSS 本地兼容模式** | `MOSS-Transcribe-Diarize-Q8` 一次生成 | 内建 | Vulkan GPU 优先；按显卡上下文自动安全分段，长度不足时继续缩短 GPU 段 | 希望沿用已有 MOSS 工作流或直接得到说话人轨道 |
 | **Qwen3-ASR + ForcedAligner 高精度模式** | Qwen3-ASR 生成文字，ForcedAligner 生成逐词/逐 token 时间轴 | 可选：再跑一次 MOSS | 标准 PyTorch，Windows CUDA 优先；ASR 与对齐器顺序加载 | 更看重中英混说、文字质量与细粒度时间轴 |
 
 “快速”和“高精度”是工作流定位，不是所有录音条件下的绝对基准。噪声、口音、多人抢话、术语、驱动和显卡都会影响速度及正确性；重要内容仍建议抽听核对。
@@ -26,11 +26,11 @@ MediaScribe 是一个面向 Windows 10/11 x64 的本地媒体转写 GUI。把已
 
 1. 在 GUI 中添加一个或多个视频/音频文件，选择输出文件夹、语言、模式和格式。
 2. 程序用 FFprobe 读取媒体，用 FFmpeg 合并音轨并提取为 16 kHz、单声道 PCM WAV；原文件不会被修改或删除。
-3. 队列从上到下逐个处理。Whisper 与 Qwen 默认只做文字和时间轴；勾选“说话人区分”后，才额外运行 MOSS 并按时间重叠合入说话人标签。
+3. 队列从上到下逐个处理。Whisper 与 Qwen 默认只做文字和时间轴；勾选“说话人区分”后，会先额外运行 MOSS 生成说话人轨道，再按时间重叠合入标签。取消时，未完成文件会保留为“可重新开始”，可以直接切换模型后再次点击开始。
 4. Qwen 模式会先释放 ASR 与 CUDA 缓存，再加载 ForcedAligner，避免两套大模型同时占用显存。
 5. 所有选中的格式先写入临时文件，全部成功后原子提交；取消或失败不会留下半成品。可重建的 WAV、分段音频和中间 JSON 会清理，原始媒体始终保留。
 
-单个媒体文件目前上限为 8 小时。使用 MOSS 的长录音会自动拆成最长 25 分钟、相邻 30 秒重叠的窗口，合并全局时间轴和说话人标签；其他模式也会按显存配置把 Qwen 音频切为保守的小段。
+单个媒体文件目前上限为 8 小时。使用 MOSS 的录音会先按显卡上下文推导安全窗口（并受 25 分钟原生硬上限约束），相邻窗口重叠 30 秒，再合并全局时间轴和说话人标签。若某个 GPU 段仍报告上下文不足，程序会继续缩短该计划并重试 Vulkan，而不是把整段录音改用慢速 CPU；只有非长度类 GPU 运行故障才会回退 CPU。其他模式也会按显存配置把 Qwen 音频切为保守的小段。
 
 ## 显卡自适应，而非只为 RTX 5060 编写
 
@@ -140,7 +140,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRun
 
 ```powershell
 winget install --id JRSoftware.InnoSetup -e
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.0
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.1
 ```
 
 发布脚本会校验原生依赖与模型描述、运行 C# 和两套 Python sidecar 测试、生成 `win-x64` 自包含 GUI、拷贝 Qwen 与 Whisper 安装脚本，并输出：
@@ -153,7 +153,7 @@ artifacts\release\SHA256SUMS.txt
 只生成可便携目录、跳过 Inno Setup：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.0 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.1 -SkipInstaller
 ```
 
 ## 开源与许可证

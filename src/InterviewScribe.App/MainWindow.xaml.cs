@@ -370,6 +370,7 @@ public partial class MainWindow : Window
         }
 
         UpdateTranscriptionModeUi();
+        UpdateStartButtonState();
     }
 
     private void UpdateTranscriptionModeUi()
@@ -916,21 +917,39 @@ public partial class MainWindow : Window
 
     private void UpdateQueueCancelledState()
     {
-        _currentState = JobState.Cancelled;
-        var cancelledCount = _queueItems.Count(item => item.State == QueueItemState.Cancelled);
+        var requeuedCount = RequeueCancelledItemsForRetry();
+        _currentState = JobState.Idle;
         StatusTitleText.Text = "队列已停止";
-        StatusDetailText.Text = $"已取消当前任务，并停止队列中其余 {Math.Max(0, cancelledCount - 1)} 个文件。原始媒体文件没有被修改。";
-        FooterStatusText.Text = "队列已取消";
+        StatusDetailText.Text = requeuedCount == 0
+            ? "当前任务已取消。原始媒体文件没有被修改。"
+            : $"当前任务已取消；{requeuedCount} 个未完成文件已保留在队列中，可更换模型后直接重新开始。";
+        FooterStatusText.Text = requeuedCount == 0 ? "队列已取消" : "队列已取消 · 可重新开始";
         OverallProgressBar.IsIndeterminate = false;
         OverallProgressBar.Value = _lastDisplayedPercentage;
         ProgressPercentText.Text = $"{_lastDisplayedPercentage}%";
         _estimatedCompletionAt = null;
         ElapsedText.Text = $"总用时 {FormatElapsed(_taskStopwatch?.Elapsed ?? TimeSpan.Zero)} · 已取消";
-        LogProgressSummaryText.Text = $"{_lastDisplayedPercentage}% · 队列已取消";
-        StatusBadgeText.Text = "已取消";
-        StatusBadgeBorder.Background = IdleBackground;
-        StatusBadgeText.Foreground = IdleForeground;
-        AppendLog("队列已由用户取消；尚未开始的文件已标记为已取消。");
+        LogProgressSummaryText.Text = requeuedCount == 0
+            ? $"{_lastDisplayedPercentage}% · 队列已取消"
+            : $"{_lastDisplayedPercentage}% · 已可重新开始";
+        StatusBadgeText.Text = requeuedCount == 0 ? "已取消" : "可重新开始";
+        StatusBadgeBorder.Background = requeuedCount == 0 ? IdleBackground : PrimaryBackground;
+        StatusBadgeText.Foreground = requeuedCount == 0 ? IdleForeground : PrimaryForeground;
+        AppendLog(requeuedCount == 0
+            ? "队列已由用户取消。"
+            : $"队列已由用户取消；{requeuedCount} 个未完成文件已重新排队，可切换模型后直接点击开始转写。");
+    }
+
+    private int RequeueCancelledItemsForRetry()
+    {
+        var requeuedCount = 0;
+        foreach (var queueItem in _queueItems.Where(item => item.State == QueueItemState.Cancelled))
+        {
+            queueItem.SetState(QueueItemState.Queued, "上次已取消");
+            requeuedCount++;
+        }
+
+        return requeuedCount;
     }
 
     private void UpdateProgress(OperationProgress progress)
@@ -1661,7 +1680,7 @@ public partial class MainWindow : Window
             State = state;
             StatusText = state switch
             {
-                QueueItemState.Queued => "排队中",
+                QueueItemState.Queued => string.IsNullOrWhiteSpace(detail) ? "排队中" : $"排队中 · {detail}",
                 QueueItemState.Running => string.IsNullOrWhiteSpace(detail) ? "处理中" : $"处理中 · {detail}",
                 QueueItemState.Completed => "已完成",
                 QueueItemState.Failed => string.IsNullOrWhiteSpace(detail) ? "失败" : $"失败 · {detail}",

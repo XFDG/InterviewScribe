@@ -510,11 +510,11 @@
                                       FontSize="13"
                                       Margin="0,12,0,0" />
                             <CheckBox x:Name="IncludeSpeakersCheckBox"
-                                      Content="说话人区分（额外运行本地 MOSS）"
+                                      Content="说话人区分（额外运行本地 MOSS GPU 分段处理）"
                                       IsChecked="False"
                                       FontSize="13"
                                       Margin="0,11,0,0" />
-                            <TextBlock Text="默认关闭以保持快速模式接近 Buzz 的速度。勾选后会额外运行保留的本地 MOSS，并把说话人标签合入结果；时间轴不受影响。两个选项会同时应用于 TXT、Markdown、Word 和 PDF；SRT 只受说话人开关影响。"
+                            <TextBlock Text="默认关闭以保持快速模式接近 Buzz 的速度。勾选后会先运行保留的本地 MOSS 说话人轨道，再执行 Whisper 或 Qwen 的文字识别；MOSS 会按显存安全分段优先使用 GPU。时间轴不受影响。两个选项会同时应用于 TXT、Markdown、Word 和 PDF；SRT 只受说话人开关影响。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="18"

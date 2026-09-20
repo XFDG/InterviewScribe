@@ -11,7 +11,8 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 public sealed class TranscriptionPipeline
 {
     private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(8);
-    private static readonly TimeSpan VulkanProtectedContextMaximumDuration = TimeSpan.FromMinutes(25);
+    private static readonly TimeSpan MinimumMossGpuChunkDuration = TimeSpan.FromMinutes(2);
+    private const int MaximumMossGpuContextReplans = 2;
     internal const int VulkanProtectedContextTokens = 16_384;
     private const string WhisperTurboDisplayName = "Whisper large-v3-turbo + Faster-Whisper";
     private const string QwenLocalDisplayName = "Qwen3-ASR 1.7B + ForcedAligner";
@@ -228,6 +229,14 @@ public sealed class TranscriptionPipeline
             EngineResultDto? mossResult = null;
             if (useMoss)
             {
+                if (request.EnableSpeakerDiarization && request.Mode != TranscriptionMode.MossLocalFast)
+                {
+                    AddLog(
+                        logMessages,
+                        "已启用说话人区分：将先生成额外的本地 MOSS 说话人轨道；" +
+                        "Whisper/Qwen 的文字识别将在该轨道完成后开始。",
+                        diagnostics);
+                }
                 progressCoordinator.Report(
                     PipelinePhase.MossDiarization,
                     JobState.ReadyToTranscribe,
@@ -249,6 +258,7 @@ public sealed class TranscriptionPipeline
                     jobDirectory,
                     progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
                     progressCoordinator.ResetEta,
+                    () => progressCoordinator.BeginPhaseRetry(PipelinePhase.MossDiarization),
                     logMessages,
                     diagnostics,
                     cancellationToken).ConfigureAwait(false);
@@ -417,14 +427,102 @@ public sealed class TranscriptionPipeline
         string jobDirectory,
         IProgress<OperationProgress>? progress,
         Action resetEta,
+        Action restartMossProgress,
         ICollection<string> logMessages,
         IProgress<string>? diagnostics,
         CancellationToken cancellationToken)
     {
-        var chunks = MossChunkPlanner.Create(audioDuration);
+        var maximumChunkDuration = MossChunkPlanner.GetGpuSafeMaximumChunkDuration(
+            gpuProfile.MossContextTokens);
+
+        for (var planAttempt = 0; ; planAttempt++)
+        {
+            var chunks = MossChunkPlanner.Create(audioDuration, maximumChunkDuration);
+            try
+            {
+                await RunMossPlanAsync(
+                    ffmpegPath,
+                    languageSelection,
+                    engineHostPath,
+                    runtimeDirectory,
+                    modelPath,
+                    sourceWavPath,
+                    finalResultPath,
+                    sourcePath,
+                    audioDuration,
+                    gpuProfile,
+                    maximumChunkDuration,
+                    planAttempt,
+                    chunks,
+                    jobDirectory,
+                    progress,
+                    resetEta,
+                    logMessages,
+                    diagnostics,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (MossGpuChunkSizeException exception) when (
+                !cancellationToken.IsCancellationRequested &&
+                planAttempt < MaximumMossGpuContextReplans &&
+                maximumChunkDuration > MinimumMossGpuChunkDuration)
+            {
+                var reducedMaximum = ReduceMossGpuChunkDuration(maximumChunkDuration);
+                if (reducedMaximum >= maximumChunkDuration)
+                {
+                    throw;
+                }
+
+                TryDelete(finalResultPath);
+                TryDelete(finalResultPath + ".tmp");
+                AddLog(
+                    logMessages,
+                    $"MOSS GPU 分段仍触及上下文：{exception.Message} 已将最长分段从 " +
+                    $"{FormatDuration(maximumChunkDuration)} 缩短为 {FormatDuration(reducedMaximum)}，" +
+                    "继续使用 Vulkan GPU，不会整段改用 CPU。",
+                    diagnostics);
+                restartMossProgress();
+                progress?.Report(new OperationProgress(
+                    JobState.ReadyToTranscribe,
+                    "MOSS 正在缩短音频分段后继续使用 GPU；剩余时间将重新估算。",
+                    0));
+                maximumChunkDuration = reducedMaximum;
+            }
+            catch (MossGpuChunkSizeException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    "MOSS 已多次缩短 GPU 音频分段，但仍无法在当前显卡上下文中输出完整结果。" +
+                    "为避免把整段录音改用极慢的 CPU，本次已停止；可取消“说话人区分”后使用 Whisper/Qwen 转写，" +
+                    $"或查看诊断文件：{jobDirectory}",
+                    exception);
+            }
+        }
+    }
+
+    private async Task RunMossPlanAsync(
+        string ffmpegPath,
+        LanguageSelection languageSelection,
+        string engineHostPath,
+        string runtimeDirectory,
+        string modelPath,
+        string sourceWavPath,
+        string finalResultPath,
+        string sourcePath,
+        TimeSpan audioDuration,
+        GpuExecutionProfile gpuProfile,
+        TimeSpan maximumChunkDuration,
+        int planAttempt,
+        IReadOnlyList<MossChunkPlan> chunks,
+        string jobDirectory,
+        IProgress<OperationProgress>? progress,
+        Action resetEta,
+        ICollection<string> logMessages,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
         var chunkResults = new List<MossChunkEngineResult>(chunks.Count);
         var temporaryResultPaths = new List<string>();
-        var audioDirectory = Path.Combine(jobDirectory, ".moss-audio-chunks");
+        var audioDirectory = Path.Combine(jobDirectory, $".moss-audio-chunks-plan-{planAttempt:00}");
         var totalInferenceTime = TimeSpan.Zero;
 
         if (chunks.Count > 1)
@@ -433,15 +531,15 @@ public sealed class TranscriptionPipeline
             AddLog(
                 logMessages,
                 $"长录音将拆成 {chunks.Count} 段（每段不超过 " +
-                $"{MossChunkPlanner.MaximumChunkDuration.TotalMinutes:0} 分钟，边界重叠 " +
-                $"{MossChunkPlanner.BoundaryOverlap.TotalSeconds:0} 秒）；每段优先使用 GPU，仅失败段回退 CPU。",
+                $"{FormatDuration(maximumChunkDuration)}，边界重叠 " +
+                $"{MossChunkPlanner.BoundaryOverlap.TotalSeconds:0} 秒）；每段优先使用 Vulkan GPU。",
                 diagnostics);
         }
 
         AddLog(
             logMessages,
             $"GPU 优先：{gpuProfile.AdapterName} 将使用 {gpuProfile.MossContextTokens:N0}-token 保守显存窗口；" +
-            "若某段无法保证完整输出，只对该段用 CPU 完整重试。",
+            $"根据该窗口，单段最长 {FormatDuration(maximumChunkDuration)}。上下文长度不足时会先自动缩短分段并继续使用 GPU。",
             diagnostics);
 
         try
@@ -451,14 +549,16 @@ public sealed class TranscriptionPipeline
                 cancellationToken.ThrowIfCancellationRequested();
                 var chunk = chunks[index];
                 var chunkNumber = index + 1;
-                var runLabel = chunks.Count == 1 ? null : $"chunk-{chunkNumber:000}";
+                var runLabel = chunks.Count == 1
+                    ? planAttempt == 0 ? null : $"retry-{planAttempt:00}"
+                    : $"plan-{planAttempt:00}-chunk-{chunkNumber:000}";
                 var displayPrefix = chunks.Count == 1 ? string.Empty : $"第 {chunkNumber}/{chunks.Count} 段：";
                 var chunkAudioPath = chunks.Count == 1
                     ? sourceWavPath
                     : Path.Combine(audioDirectory, $"audio-{chunkNumber:000}.wav");
                 var chunkResultPath = chunks.Count == 1
                     ? finalResultPath
-                    : Path.Combine(jobDirectory, $"moss-result.chunk-{chunkNumber:000}.json");
+                    : Path.Combine(jobDirectory, $"moss-result.plan-{planAttempt:00}.chunk-{chunkNumber:000}.json");
                 if (chunks.Count > 1)
                 {
                     temporaryResultPaths.Add(chunkResultPath);
@@ -601,13 +701,26 @@ public sealed class TranscriptionPipeline
                 diagnostics);
             return attempt;
         }
+        catch (EngineRunException vulkanException) when (
+            !cancellationToken.IsCancellationRequested &&
+            IsMossGpuChunkSizeFailure(vulkanException))
+        {
+            TryDelete(resultPath);
+            TryDelete(resultPath + ".tmp");
+            AddLog(
+                logMessages,
+                $"{label}Vulkan GPU 段超过当前上下文，准备缩短分段后继续使用 GPU：" +
+                vulkanException.CleanMessage,
+                diagnostics);
+            throw new MossGpuChunkSizeException(vulkanException.CleanMessage, vulkanException);
+        }
         catch (EngineRunException vulkanException) when (!cancellationToken.IsCancellationRequested)
         {
             AddLog(
                 logMessages,
-                $"{label}Vulkan 未能完成识别：{vulkanException.CleanMessage}",
+                $"{label}Vulkan GPU 未能完成识别：{vulkanException.CleanMessage}",
                 diagnostics);
-            AddLog(logMessages, $"{label}已自动切换到 CPU 后端重试。", diagnostics);
+            AddLog(logMessages, $"{label}已自动切换到 CPU 后端重试（不是音频上下文长度问题）。", diagnostics);
             resetEta();
             progress?.Report(new OperationProgress(
                 JobState.ReadyToTranscribe,
@@ -690,7 +803,7 @@ public sealed class TranscriptionPipeline
 
         if (result.IsPartial)
         {
-            throw new EngineRunException("模型报告结果被截断，不能当作完整输出。", 0);
+            throw new EngineRunException("模型报告结果被截断，不能当作完整输出（通常是上下文长度不足）。", 0);
         }
 
         if (result.Segments is null)
@@ -1212,9 +1325,32 @@ public sealed class TranscriptionPipeline
         GpuExecutionProfile gpuProfile)
     {
         ArgumentNullException.ThrowIfNull(gpuProfile);
-        return mediaDuration > TimeSpan.Zero && mediaDuration <= VulkanProtectedContextMaximumDuration
+        var maximumChunkDuration = MossChunkPlanner.GetGpuSafeMaximumChunkDuration(
+            gpuProfile.MossContextTokens);
+        return mediaDuration > TimeSpan.Zero && mediaDuration <= maximumChunkDuration
             ? gpuProfile.MossContextTokens
             : null;
+    }
+
+    private static TimeSpan ReduceMossGpuChunkDuration(TimeSpan maximumChunkDuration)
+    {
+        var reducedSeconds = Math.Floor(maximumChunkDuration.TotalSeconds / 2d);
+        return TimeSpan.FromSeconds(Math.Max(
+            MinimumMossGpuChunkDuration.TotalSeconds,
+            reducedSeconds));
+    }
+
+    private static bool IsMossGpuChunkSizeFailure(EngineRunException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        var message = exception.CleanMessage;
+        return message.Contains("input audio too long", StringComparison.OrdinalIgnoreCase) ||
+            (message.Contains("prompt", StringComparison.OrdinalIgnoreCase) &&
+             message.Contains("context", StringComparison.OrdinalIgnoreCase) &&
+             message.Contains("exceed", StringComparison.OrdinalIgnoreCase)) ||
+            (message.Contains("context", StringComparison.OrdinalIgnoreCase) &&
+             message.Contains("too long", StringComparison.OrdinalIgnoreCase)) ||
+            message.Contains("模型报告结果被截断", StringComparison.Ordinal);
     }
 
     internal static TimeSpan GetEffectiveMediaDuration(
@@ -1591,6 +1727,9 @@ public sealed class TranscriptionPipeline
         public int ExitCode { get; } = exitCode;
         public string CleanMessage { get; } = message;
     }
+
+    private sealed class MossGpuChunkSizeException(string message, Exception innerException)
+        : Exception(message, innerException);
 
     private sealed class ChunkOperationProgress(
         IProgress<OperationProgress>? target,

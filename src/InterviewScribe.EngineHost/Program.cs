@@ -34,7 +34,7 @@ internal static class Program
             {
                 sessionParams.ContextTokens = contextTokens;
                 EmitDiagnostic(
-                    $"已启用 {contextTokens:N0}-token 显存保护；若无法完整识别，主程序会自动改用 CPU 完整重试。");
+                    $"已启用 {contextTokens:N0}-token 显存保护；若某段超过上下文，主程序会先缩短分段并继续使用 GPU。");
             }
 
             Check(

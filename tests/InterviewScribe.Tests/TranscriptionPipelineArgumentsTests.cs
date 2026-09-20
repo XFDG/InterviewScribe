@@ -95,8 +95,8 @@ public sealed class TranscriptionPipelineArgumentsTests
 
     [Theory]
     [InlineData(1, true)]
-    [InlineData(25, true)]
-    [InlineData(26, false)]
+    [InlineData(17, true)]
+    [InlineData(18, false)]
     public void GetVulkanContextTokenCap_OnlyProtectsGpuSizedChunks(
         int minutes,
         bool expectedCap)
