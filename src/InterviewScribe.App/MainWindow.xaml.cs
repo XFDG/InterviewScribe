@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -43,6 +44,7 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush LocalStatusDot = CreateBrush(0x54, 0xD6, 0xA1);
 
     private readonly DispatcherTimer _elapsedTimer;
+    private readonly ObservableCollection<QueueItem> _queueItems = [];
     private TranscriptionPipeline? _pipeline;
     private CancellationTokenSource? _runCancellation;
     private Stopwatch? _taskStopwatch;
@@ -52,6 +54,7 @@ public partial class MainWindow : Window
     private JobState? _lastLoggedProgressState;
     private string? _lastLoggedProgressMessage;
     private string? _sourcePath;
+    private QueueItem? _activeQueueItem;
     private string? _lastPrimaryOutputPath;
     private string? _lastOutputDirectory;
     private JobState _currentState = JobState.Idle;
@@ -67,6 +70,7 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(1)
         };
         _elapsedTimer.Tick += ElapsedTimer_Tick;
+        QueueListBox.ItemsSource = _queueItems;
         ResetStageVisuals();
     }
 
@@ -88,10 +92,10 @@ public partial class MainWindow : Window
 
         var dialog = new OpenFileDialog
         {
-            Title = "选择面试录屏",
+            Title = "添加媒体文件到转写队列",
             Filter = "视频与音频|*.mp4;*.mkv;*.mov;*.avi;*.m4v;*.webm;*.wmv;*.mpeg;*.mpg;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.wma|所有文件|*.*",
             CheckFileExists = true,
-            Multiselect = false
+            Multiselect = true
         };
 
         if (!string.IsNullOrWhiteSpace(_sourcePath))
@@ -101,7 +105,7 @@ public partial class MainWindow : Window
 
         if (dialog.ShowDialog(this) == true)
         {
-            SelectSourceFile(dialog.FileName);
+            QueueSourceFiles(dialog.FileNames);
         }
     }
 
@@ -142,7 +146,7 @@ public partial class MainWindow : Window
 
     private void Window_PreviewDragOver(object sender, DragEventArgs e)
     {
-        e.Effects = !_isRunning && !_isInstallingQwen && TryGetDroppedFile(e.Data, out _)
+        e.Effects = !_isRunning && !_isInstallingQwen && TryGetDroppedFiles(e.Data, out _)
             ? DragDropEffects.Copy
             : DragDropEffects.None;
         e.Handled = true;
@@ -150,9 +154,9 @@ public partial class MainWindow : Window
 
     private void Window_Drop(object sender, DragEventArgs e)
     {
-        if (!_isRunning && !_isInstallingQwen && TryGetDroppedFile(e.Data, out var path))
+        if (!_isRunning && !_isInstallingQwen && TryGetDroppedFiles(e.Data, out var paths))
         {
-            SelectSourceFile(path);
+            QueueSourceFiles(paths);
         }
 
         e.Handled = true;
@@ -160,16 +164,17 @@ public partial class MainWindow : Window
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
-        var sourcePath = _sourcePath;
-        if (_isRunning || _isInstallingQwen || string.IsNullOrWhiteSpace(sourcePath))
+        if (_isRunning || _isInstallingQwen)
         {
             return;
         }
 
-        if (!File.Exists(sourcePath))
+        var queuedItems = _queueItems
+            .Where(item => item.State == QueueItemState.Queued)
+            .ToList();
+        if (queuedItems.Count == 0)
         {
-            ShowFriendlyError("找不到所选视频。它可能已被移动或删除，请重新选择。", "文件不存在");
-            SelectSourceFile(null);
+            ShowFriendlyError("请先添加至少一个媒体文件到队列。", "队列为空");
             return;
         }
 
@@ -213,39 +218,108 @@ public partial class MainWindow : Window
         AppendLog($"识别语言：{FormatSelectedLanguages(languageCodes)}");
         AppendLog($"输出格式：{FormatOutputFormats(outputFormats)}");
         AppendLog($"可读文档时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人标注：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
+        AppendLog($"队列开始：{queuedItems.Count} 个文件将按顺序处理。");
         _runCancellation = new CancellationTokenSource();
-        var progress = new Progress<OperationProgress>(UpdateProgress);
-        var diagnostics = new Progress<string>(AppendDiagnosticLog);
+        _pipeline ??= new TranscriptionPipeline();
+        var completedCount = 0;
+        var failedCount = 0;
+        var wasCancelled = false;
 
         try
         {
-            var request = new PipelineRequest(sourcePath, outputDirectory)
+            foreach (var queueItem in queuedItems)
             {
-                Mode = transcriptionMode,
-                SdkApiKey = string.IsNullOrWhiteSpace(sdkApiKey) ? null : sdkApiKey,
-                LanguageCodes = languageCodes,
-                FormattingOptions = formattingOptions,
-                OutputFormats = outputFormats,
-            };
-            _pipeline ??= new TranscriptionPipeline();
-            var result = await _pipeline.RunAsync(
-                request,
-                progress,
-                _runCancellation.Token,
-                diagnostics);
+                if (_runCancellation.IsCancellationRequested)
+                {
+                    wasCancelled = true;
+                    break;
+                }
 
-            ShowResult(result);
+                if (!File.Exists(queueItem.SourcePath))
+                {
+                    queueItem.SetState(QueueItemState.Failed, "文件不存在");
+                    failedCount++;
+                    completedCount++;
+                    AppendLog($"跳过队列项：找不到文件 {queueItem.SourcePath}");
+                    RefreshQueueUi();
+                    continue;
+                }
+
+                var completedBeforeCurrent = completedCount;
+                PrepareForQueueItem(queueItem, completedBeforeCurrent, queuedItems.Count);
+                var progress = new Progress<OperationProgress>(operation =>
+                    UpdateQueueProgress(operation, queueItem, completedBeforeCurrent, queuedItems.Count));
+                var diagnostics = new Progress<string>(message =>
+                    AppendQueueDiagnosticLog(message, queueItem, completedBeforeCurrent, queuedItems.Count));
+
+                try
+                {
+                    var request = new PipelineRequest(queueItem.SourcePath, outputDirectory)
+                    {
+                        Mode = transcriptionMode,
+                        SdkApiKey = string.IsNullOrWhiteSpace(sdkApiKey) ? null : sdkApiKey,
+                        LanguageCodes = languageCodes,
+                        FormattingOptions = formattingOptions,
+                        OutputFormats = outputFormats,
+                    };
+                    var result = await _pipeline.RunAsync(
+                        request,
+                        progress,
+                        _runCancellation.Token,
+                        diagnostics);
+
+                    queueItem.SetState(QueueItemState.Completed);
+                    completedCount++;
+                    ShowResult(result);
+                    AppendLog($"队列项完成：{queueItem.FileName}");
+                }
+                catch (OperationCanceledException)
+                {
+                    queueItem.SetState(QueueItemState.Cancelled);
+                    wasCancelled = true;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    if (_runCancellation.IsCancellationRequested)
+                    {
+                        queueItem.SetState(QueueItemState.Cancelled);
+                        wasCancelled = true;
+                        break;
+                    }
+
+                    queueItem.SetState(QueueItemState.Failed, "转写失败");
+                    failedCount++;
+                    completedCount++;
+                    AppendLog($"队列项失败：{queueItem.FileName} · {GetFriendlyError(ex)}");
+                    AppendLog(ex.ToString());
+                    LogExpander.IsExpanded = true;
+                }
+
+                RefreshQueueUi();
+            }
+
+            if (wasCancelled)
+            {
+                MarkQueuedItemsCancelled();
+                UpdateQueueCancelledState();
+            }
+            else
+            {
+                UpdateQueueCompletionState(queuedItems.Count, failedCount);
+            }
         }
         catch (OperationCanceledException)
         {
-            UpdateCancelledState();
+            MarkQueuedItemsCancelled();
+            UpdateQueueCancelledState();
         }
         catch (Exception ex)
         {
             UpdateFailedState(ex);
             if (!_closeAfterCancellation)
             {
-                ShowFriendlyError(GetFriendlyError(ex), "转写没有完成");
+                ShowFriendlyError(GetFriendlyError(ex), "转写队列没有完成");
             }
         }
         finally
@@ -255,13 +329,17 @@ public partial class MainWindow : Window
             _runCancellation?.Dispose();
             _runCancellation = null;
             _isRunning = false;
+            _activeQueueItem = null;
             ChangeFileButton.IsEnabled = true;
             DropZoneBorder.IsEnabled = true;
+            QueueListBox.IsEnabled = true;
+            ClearQueueButton.IsEnabled = true;
             SettingsPanel.IsEnabled = true;
             RecognitionModePanel.IsEnabled = true;
             CancelButton.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = true;
-            StartButton.IsEnabled = !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && HasSelectedOutputFormat();
+            RefreshQueueUi();
+            UpdateStartButtonState();
 
             if (_closeAfterCancellation)
             {
@@ -279,14 +357,14 @@ public partial class MainWindow : Window
     {
         var hasSelectedLanguage = HasSelectedLanguage();
         LanguageValidationText.Visibility = hasSelectedLanguage ? Visibility.Collapsed : Visibility.Visible;
-        StartButton.IsEnabled = !_isRunning && !_isInstallingQwen && !string.IsNullOrWhiteSpace(_sourcePath) && hasSelectedLanguage && HasSelectedOutputFormat();
+        UpdateStartButtonState();
     }
 
     private void OutputFormatCheckBox_Click(object sender, RoutedEventArgs e)
     {
         var hasSelectedFormat = HasSelectedOutputFormat();
         OutputFormatValidationText.Visibility = hasSelectedFormat ? Visibility.Collapsed : Visibility.Visible;
-        StartButton.IsEnabled = !_isRunning && !_isInstallingQwen && !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && hasSelectedFormat;
+        UpdateStartButtonState();
     }
 
     private void TranscriptionMode_Checked(object sender, RoutedEventArgs e)
@@ -324,7 +402,7 @@ public partial class MainWindow : Window
                 PrivacyTitleText.Text = "隐私保护";
                 PrivacySubtitleText.Text = "文件不会上传云端";
                 PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次安装时会下载并校验 MOSS、Qwen 和对齐模型，安装后可断网运行。";
-                FooterModeText.Text = "InterviewScribe · Qwen 本地高精度";
+                FooterModeText.Text = "MediaScribe · Qwen 本地高精度";
                 StageTranscribeText.Text = "③ Qwen 识别与分人";
                 break;
 
@@ -334,8 +412,8 @@ public partial class MainWindow : Window
                 RecognitionSummaryDetailText.Text = "Qwen 云端生成文字；本地按语音活动和 MOSS 说话人边界生成分段时间轴，结果在本机合并。";
                 PrivacyTitleText.Text = "云端处理提示";
                 PrivacySubtitleText.Text = "提取的音频会发送到 Qwen 官方服务";
-                PrivacyDetailText.Text = "原视频保留在本机，但为了识别文字，提取后的音频片段会上传。返回结果在本机与说话人轨道合并；云端数据处理与保留规则以 Qwen 服务条款为准。";
-                FooterModeText.Text = "InterviewScribe · Qwen 官方 SDK";
+                PrivacyDetailText.Text = "原始媒体文件保留在本机，但为了识别文字，提取后的音频片段会上传。返回结果在本机与说话人轨道合并；云端数据处理与保留规则以 Qwen 服务条款为准。";
+                FooterModeText.Text = "MediaScribe · Qwen 官方 SDK";
                 StageTranscribeText.Text = "③ Qwen 云端识别与分人";
                 break;
 
@@ -346,14 +424,14 @@ public partial class MainWindow : Window
                 PrivacyTitleText.Text = "隐私保护";
                 PrivacySubtitleText.Text = "文件不会上传云端";
                 PrivacyDetailText.Text = "视频、临时音频和转写文字都只在这台电脑上处理。首次使用仅下载公开模型文件。";
-                FooterModeText.Text = "InterviewScribe · MOSS 本地快速";
+                FooterModeText.Text = "MediaScribe · MOSS 本地快速";
                 StageTranscribeText.Text = "③ 识别与分人";
                 break;
         }
 
         if (!_isRunning && _currentState == JobState.Idle)
         {
-            StatusDetailText.Text = string.IsNullOrWhiteSpace(_sourcePath)
+            StatusDetailText.Text = !_queueItems.Any(item => item.State == QueueItemState.Queued)
                 ? GetSelectionPrompt(mode)
                 : GetReadyDetail(mode);
         }
@@ -380,7 +458,7 @@ public partial class MainWindow : Window
         if (scriptPath is null)
         {
             ShowFriendlyError(
-                "找不到高精度组件安装脚本。请重新安装 InterviewScribe，或确认 tools\\qwen\\Install-QwenRuntime.ps1 存在。",
+                "找不到高精度组件安装脚本。请重新安装 MediaScribe，或确认 tools\\qwen\\Install-QwenRuntime.ps1 存在。",
                 "缺少安装组件");
             return;
         }
@@ -391,6 +469,8 @@ public partial class MainWindow : Window
         StartButton.IsEnabled = false;
         ChangeFileButton.IsEnabled = false;
         DropZoneBorder.IsEnabled = false;
+        QueueListBox.IsEnabled = false;
+        ClearQueueButton.IsEnabled = false;
         SettingsPanel.IsEnabled = false;
         RecognitionModePanel.IsEnabled = false;
 
@@ -436,7 +516,7 @@ public partial class MainWindow : Window
             }
             else if (process.ExitCode == InstallerAlreadyRunningExitCode)
             {
-                AppendLog("未启动安装：另一个 InterviewScribe 高精度组件安装程序仍在运行。");
+                AppendLog("未启动安装：另一个 MediaScribe 高精度组件安装程序仍在运行。");
                 ShowFriendlyError(
                     "另一项高精度组件安装仍在运行。请等待现有的 PowerShell 安装窗口完成后再重试。",
                     "安装正在进行");
@@ -461,9 +541,11 @@ public partial class MainWindow : Window
             InstallQwenSdkRuntimeButton.IsEnabled = !_isRunning;
             ChangeFileButton.IsEnabled = !_isRunning;
             DropZoneBorder.IsEnabled = !_isRunning;
+            QueueListBox.IsEnabled = !_isRunning;
+            ClearQueueButton.IsEnabled = !_isRunning;
             SettingsPanel.IsEnabled = !_isRunning;
             RecognitionModePanel.IsEnabled = !_isRunning;
-            StartButton.IsEnabled = !_isRunning && !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && HasSelectedOutputFormat();
+            UpdateStartButtonState();
         }
     }
 
@@ -536,8 +618,8 @@ public partial class MainWindow : Window
 
         var answer = MessageBox.Show(
             this,
-            "转写仍在进行。现在退出会取消本次任务，但不会删除原视频。要继续退出吗？",
-            "取消转写并退出",
+            "转写队列仍在进行。现在退出会取消当前任务并停止队列，但不会删除原始媒体文件。要继续退出吗？",
+            "取消队列并退出",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning,
             MessageBoxResult.No);
@@ -558,52 +640,161 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SelectSourceFile(string? path)
+    private void QueueSourceFiles(IEnumerable<string> paths)
     {
-        if (string.IsNullOrWhiteSpace(path))
+        var addedFiles = new List<FileInfo>();
+        var unsupportedCount = 0;
+        var candidatePaths = new List<string>();
+
+        foreach (var path in paths.Where(path => !string.IsNullOrWhiteSpace(path)))
+        {
+            try
+            {
+                candidatePaths.Add(Path.GetFullPath(path));
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                unsupportedCount++;
+                AppendLog($"文件路径无效，未加入队列：{path}");
+            }
+        }
+
+        foreach (var path in candidatePaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(path) || !SupportedExtensions.Contains(Path.GetExtension(path)))
+            {
+                unsupportedCount++;
+                continue;
+            }
+
+            if (_queueItems.Any(item => string.Equals(item.SourcePath, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                AppendLog($"已在队列中，跳过重复文件：{path}");
+                continue;
+            }
+
+            try
+            {
+                var file = new FileInfo(path);
+                _queueItems.Add(new QueueItem(file));
+                addedFiles.Add(file);
+                AppendLog($"已加入队列：{file.FullName}");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                unsupportedCount++;
+                AppendLog($"无法读取文件，未加入队列：{path} · {ex.Message}");
+            }
+        }
+
+        if (addedFiles.Count == 0)
+        {
+            ShowFriendlyError("没有可加入队列的媒体文件。支持 MP4、MKV、MOV、AVI、WEBM、MP3、WAV、M4A 等格式。", "没有添加文件");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputFolderTextBox.Text))
+        {
+            OutputFolderTextBox.Text = Path.Combine(addedFiles[0].DirectoryName ?? Environment.CurrentDirectory, "转写结果");
+        }
+
+        if (unsupportedCount > 0)
+        {
+            AppendLog($"有 {unsupportedCount} 个文件不受支持或无法读取，未加入队列。");
+        }
+
+        ResultCard.Visibility = Visibility.Collapsed;
+        _lastPrimaryOutputPath = null;
+        _lastOutputDirectory = null;
+        RefreshQueueUi();
+        SetIdleState("队列准备就绪", GetReadyDetail(GetSelectedTranscriptionMode()), "可以开始");
+        UpdateStartButtonState();
+    }
+
+    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRunning || _isInstallingQwen || sender is not Button { Tag: QueueItem item })
+        {
+            return;
+        }
+
+        _queueItems.Remove(item);
+        AppendLog($"已从队列移除：{item.FileName}");
+        RefreshQueueUi();
+        UpdateStartButtonState();
+    }
+
+    private void ClearQueue_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isRunning || _isInstallingQwen || _queueItems.Count == 0)
+        {
+            return;
+        }
+
+        _queueItems.Clear();
+        _activeQueueItem = null;
+        _sourcePath = null;
+        ResultCard.Visibility = Visibility.Collapsed;
+        _lastPrimaryOutputPath = null;
+        _lastOutputDirectory = null;
+        AppendLog("已清空转写队列。");
+        RefreshQueueUi();
+        SetIdleState("准备就绪", GetSelectionPrompt(GetSelectedTranscriptionMode()), "等待开始");
+        UpdateStartButtonState();
+    }
+
+    private void RefreshQueueUi()
+    {
+        var queueCount = _queueItems.Count;
+        var queuedCount = _queueItems.Count(item => item.State == QueueItemState.Queued);
+        var runningCount = _queueItems.Count(item => item.State == QueueItemState.Running);
+        var completedCount = _queueItems.Count(item => item.State == QueueItemState.Completed);
+        var failedCount = _queueItems.Count(item => item.State == QueueItemState.Failed);
+        var cancelledCount = _queueItems.Count(item => item.State == QueueItemState.Cancelled);
+
+        if (queueCount == 0)
         {
             _sourcePath = null;
             EmptyFilePanel.Visibility = Visibility.Visible;
             SelectedFilePanel.Visibility = Visibility.Collapsed;
-            OutputFolderTextBox.Text = string.Empty;
-            StartButton.IsEnabled = false;
+            QueueHeaderPanel.Visibility = Visibility.Collapsed;
+            QueueListBox.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var extension = Path.GetExtension(path);
-        if (!File.Exists(path) || !SupportedExtensions.Contains(extension))
-        {
-            ShowFriendlyError("请选择常见的视频或音频文件。支持 MP4、MKV、MOV、AVI、WEBM、MP3、WAV、M4A 等格式。", "不支持这个文件");
-            return;
-        }
+        var currentItem = _activeQueueItem
+            ?? _queueItems.FirstOrDefault(item => item.State == QueueItemState.Running)
+            ?? _queueItems.FirstOrDefault(item => item.State == QueueItemState.Queued)
+            ?? _queueItems[^1];
+        _sourcePath = currentItem.SourcePath;
+        EmptyFilePanel.Visibility = Visibility.Collapsed;
+        SelectedFilePanel.Visibility = Visibility.Visible;
+        QueueHeaderPanel.Visibility = Visibility.Visible;
+        QueueListBox.Visibility = Visibility.Visible;
+        ClearQueueButton.IsEnabled = !_isRunning && !_isInstallingQwen;
 
-        try
-        {
-            var file = new FileInfo(path);
-            _sourcePath = file.FullName;
-            SelectedFileNameText.Text = file.Name;
-            SelectedFileDetailsText.Text = $"{extension.TrimStart('.').ToUpperInvariant()} · {FormatFileSize(file.Length)}";
-            SelectedFileNameText.ToolTip = file.FullName;
-            EmptyFilePanel.Visibility = Visibility.Collapsed;
-            SelectedFilePanel.Visibility = Visibility.Visible;
-            OutputFolderTextBox.Text = Path.Combine(file.DirectoryName ?? Environment.CurrentDirectory, "转写结果");
-            StartButton.IsEnabled = HasSelectedLanguage() && HasSelectedOutputFormat();
-            ResultCard.Visibility = Visibility.Collapsed;
-            _lastPrimaryOutputPath = null;
-            _lastOutputDirectory = null;
-            SetIdleState("准备就绪", GetReadyDetail(GetSelectedTranscriptionMode()), "可以开始");
-            AppendLog($"已选择：{file.FullName}");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            ShowFriendlyError($"无法读取这个文件：{ex.Message}", "文件不可用");
-        }
+        SelectedFileNameText.Text = queueCount == 1
+            ? currentItem.FileName
+            : $"{queueCount} 个媒体文件已加入队列";
+        SelectedFileNameText.ToolTip = currentItem.SourcePath;
+        SelectedFileDetailsText.Text = queueCount == 1
+            ? currentItem.Details
+            : $"待处理 {queuedCount} · 处理中 {runningCount} · 已完成 {completedCount} · 失败 {failedCount} · 已取消 {cancelledCount}";
+        SelectedFileStatusText.Text = runningCount > 0
+            ? "正在处理"
+            : queuedCount > 0
+                ? "队列已就绪"
+                : failedCount > 0
+                    ? "处理结束"
+                    : "已完成";
+        QueueSummaryText.Text = $"处理顺序固定；当前队列 {queueCount} 个文件，待处理 {queuedCount} 个。";
     }
 
     private void PrepareForRun()
     {
         _isRunning = true;
         _closeAfterCancellation = false;
+        _activeQueueItem = null;
         _lastPrimaryOutputPath = null;
         _lastOutputDirectory = null;
         ResultCard.Visibility = Visibility.Collapsed;
@@ -611,6 +802,8 @@ public partial class MainWindow : Window
         LogTextBox.Clear();
         ChangeFileButton.IsEnabled = false;
         DropZoneBorder.IsEnabled = false;
+        QueueListBox.IsEnabled = false;
+        ClearQueueButton.IsEnabled = false;
         SettingsPanel.IsEnabled = false;
         RecognitionModePanel.IsEnabled = false;
         StartButton.IsEnabled = false;
@@ -628,8 +821,123 @@ public partial class MainWindow : Window
         _estimatedCompletionAt = null;
         _taskStopwatch = Stopwatch.StartNew();
         _elapsedTimer.Start();
-        AppendLog($"任务开始：{_sourcePath}");
-        UpdateProgress(new OperationProgress(JobState.WaitingForModel, GetPreparationMessage(GetSelectedTranscriptionMode())));
+        RefreshQueueUi();
+    }
+
+    private void PrepareForQueueItem(QueueItem queueItem, int completedBeforeCurrent, int totalCount)
+    {
+        _activeQueueItem = queueItem;
+        _sourcePath = queueItem.SourcePath;
+        _lastDisplayedPercentage = (int)Math.Round((double)completedBeforeCurrent / totalCount * 100, MidpointRounding.AwayFromZero);
+        _lastLoggedProgressPercentage = null;
+        _lastLoggedProgressState = null;
+        _lastLoggedProgressMessage = null;
+        _estimatedCompletionAt = null;
+        OverallProgressBar.IsIndeterminate = false;
+        OverallProgressBar.Value = _lastDisplayedPercentage;
+        ProgressPercentText.Text = $"{_lastDisplayedPercentage}%";
+        queueItem.SetState(QueueItemState.Running, "0%");
+        RefreshQueueUi();
+        AppendLog($"开始队列项 {completedBeforeCurrent + 1}/{totalCount}：{queueItem.SourcePath}");
+        UpdateQueueProgress(
+            new OperationProgress(JobState.WaitingForModel, GetPreparationMessage(GetSelectedTranscriptionMode()), 0),
+            queueItem,
+            completedBeforeCurrent,
+            totalCount);
+    }
+
+    private void UpdateQueueProgress(
+        OperationProgress operation,
+        QueueItem queueItem,
+        int completedBeforeCurrent,
+        int totalCount)
+    {
+        var itemFraction = operation.Fraction is double fraction && double.IsFinite(fraction)
+            ? Math.Clamp(fraction, 0, 1)
+            : 0;
+        var itemPercentage = (int)Math.Round(itemFraction * 100, MidpointRounding.AwayFromZero);
+        queueItem.SetState(QueueItemState.Running, $"{itemPercentage}%");
+
+        var queueFraction = Math.Clamp((completedBeforeCurrent + itemFraction) / totalCount, 0, 1);
+        UpdateProgress(operation with { Fraction = queueFraction });
+        StatusTitleText.Text = $"队列 {completedBeforeCurrent + 1}/{totalCount}：{GetStateTitle(operation.State)}";
+        StatusDetailText.Text = $"当前文件：{queueItem.FileName} · {operation.Message}";
+        FooterStatusText.Text = $"队列 {completedBeforeCurrent + 1}/{totalCount} · {operation.Message}";
+        RefreshQueueUi();
+    }
+
+    private void AppendQueueDiagnosticLog(
+        string message,
+        QueueItem queueItem,
+        int completedBeforeCurrent,
+        int totalCount)
+    {
+        AppendDiagnosticLog($"[队列 {completedBeforeCurrent + 1}/{totalCount} · {queueItem.FileName}] {message}");
+    }
+
+    private void MarkQueuedItemsCancelled()
+    {
+        foreach (var queueItem in _queueItems.Where(item => item.State == QueueItemState.Queued))
+        {
+            queueItem.SetState(QueueItemState.Cancelled);
+        }
+    }
+
+    private void UpdateQueueCompletionState(int totalCount, int failedCount)
+    {
+        _currentState = failedCount == 0 ? JobState.Completed : JobState.Failed;
+        _lastDisplayedPercentage = 100;
+        OverallProgressBar.IsIndeterminate = false;
+        OverallProgressBar.Value = 100;
+        ProgressPercentText.Text = "100%";
+        _estimatedCompletionAt = null;
+        var succeededCount = totalCount - failedCount;
+        StatusTitleText.Text = failedCount == 0 ? "队列转写完成" : "队列处理完成（部分失败）";
+        StatusDetailText.Text = failedCount == 0
+            ? $"已按顺序完成 {succeededCount} 个媒体文件。"
+            : $"已完成 {succeededCount} 个，失败 {failedCount} 个；失败原因见运行记录。";
+        FooterStatusText.Text = failedCount == 0
+            ? $"队列完成 · {succeededCount}/{totalCount}"
+            : $"队列结束 · {succeededCount} 完成 / {failedCount} 失败";
+        ElapsedText.Text = $"总用时 {FormatElapsed(_taskStopwatch?.Elapsed ?? TimeSpan.Zero)} · 队列已结束";
+        LogProgressSummaryText.Text = failedCount == 0 ? "100% · 队列已完成" : "100% · 队列含失败项";
+
+        if (failedCount == 0)
+        {
+            StatusBadgeText.Text = "队列完成";
+            StatusBadgeBorder.Background = SuccessBackground;
+            StatusBadgeText.Foreground = SuccessForeground;
+            ApplyStageVisuals(PipelinePhase.Completed, JobState.Completed);
+        }
+        else
+        {
+            StatusBadgeText.Text = "部分完成";
+            StatusBadgeBorder.Background = DangerBackground;
+            StatusBadgeText.Foreground = DangerForeground;
+        }
+
+        AppendLog(failedCount == 0
+            ? $"队列已完成：{succeededCount}/{totalCount} 个文件。"
+            : $"队列已结束：{succeededCount} 个完成，{failedCount} 个失败。");
+    }
+
+    private void UpdateQueueCancelledState()
+    {
+        _currentState = JobState.Cancelled;
+        var cancelledCount = _queueItems.Count(item => item.State == QueueItemState.Cancelled);
+        StatusTitleText.Text = "队列已停止";
+        StatusDetailText.Text = $"已取消当前任务，并停止队列中其余 {Math.Max(0, cancelledCount - 1)} 个文件。原始媒体文件没有被修改。";
+        FooterStatusText.Text = "队列已取消";
+        OverallProgressBar.IsIndeterminate = false;
+        OverallProgressBar.Value = _lastDisplayedPercentage;
+        ProgressPercentText.Text = $"{_lastDisplayedPercentage}%";
+        _estimatedCompletionAt = null;
+        ElapsedText.Text = $"总用时 {FormatElapsed(_taskStopwatch?.Elapsed ?? TimeSpan.Zero)} · 已取消";
+        LogProgressSummaryText.Text = $"{_lastDisplayedPercentage}% · 队列已取消";
+        StatusBadgeText.Text = "已取消";
+        StatusBadgeBorder.Background = IdleBackground;
+        StatusBadgeText.Foreground = IdleForeground;
+        AppendLog("队列已由用户取消；尚未开始的文件已标记为已取消。");
     }
 
     private void UpdateProgress(OperationProgress progress)
@@ -651,7 +959,7 @@ public partial class MainWindow : Window
             ProgressPercentText.Text = $"{percentage}%";
         }
 
-        if (progress.State == JobState.Completed)
+        if (progress.State == JobState.Completed && _activeQueueItem is null)
         {
             _lastDisplayedPercentage = 100;
             OverallProgressBar.Value = 100;
@@ -697,7 +1005,7 @@ public partial class MainWindow : Window
     {
         _currentState = JobState.Cancelled;
         StatusTitleText.Text = "任务已取消";
-        StatusDetailText.Text = "原视频没有被修改。下次可以重新开始。";
+        StatusDetailText.Text = "原始媒体文件没有被修改。下次可以重新开始。";
         FooterStatusText.Text = "已取消";
         OverallProgressBar.IsIndeterminate = false;
         OverallProgressBar.Value = _lastDisplayedPercentage;
@@ -740,9 +1048,9 @@ public partial class MainWindow : Window
         CancelButton.IsEnabled = false;
         StatusBadgeText.Text = "正在取消";
         StatusTitleText.Text = "正在安全停止…";
-        StatusDetailText.Text = "正在结束处理进程，可能需要几秒钟。";
-        FooterStatusText.Text = "正在取消";
-        AppendLog("收到取消请求，正在停止任务。");
+        StatusDetailText.Text = "正在结束当前处理进程，并停止队列中尚未开始的文件，可能需要几秒钟。";
+        FooterStatusText.Text = "正在停止队列";
+        AppendLog("收到取消请求，正在停止当前任务和剩余队列。");
         _runCancellation.Cancel();
     }
 
@@ -947,16 +1255,19 @@ public partial class MainWindow : Window
         _ => "准备",
     };
 
-    private static bool TryGetDroppedFile(IDataObject data, out string path)
+    private static bool TryGetDroppedFiles(IDataObject data, out IReadOnlyList<string> paths)
     {
-        path = string.Empty;
-        if (!data.GetDataPresent(DataFormats.FileDrop) || data.GetData(DataFormats.FileDrop) is not string[] files || files.Length != 1)
+        paths = [];
+        if (!data.GetDataPresent(DataFormats.FileDrop) || data.GetData(DataFormats.FileDrop) is not string[] files)
         {
             return false;
         }
 
-        path = files[0];
-        return File.Exists(path) && SupportedExtensions.Contains(Path.GetExtension(path));
+        paths = files
+            .Where(path => File.Exists(path) && SupportedExtensions.Contains(Path.GetExtension(path)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return paths.Count > 0;
     }
 
     private IReadOnlyList<string> GetSelectedLanguageCodes()
@@ -1003,6 +1314,15 @@ public partial class MainWindow : Window
 
     private bool HasSelectedOutputFormat() => GetSelectedOutputFormats() != TranscriptOutputFormat.None;
 
+    private void UpdateStartButtonState()
+    {
+        StartButton.IsEnabled = !_isRunning &&
+            !_isInstallingQwen &&
+            _queueItems.Any(item => item.State == QueueItemState.Queued) &&
+            HasSelectedLanguage() &&
+            HasSelectedOutputFormat();
+    }
+
     private IEnumerable<(CheckBox CheckBox, string Code)> GetLanguageOptions()
     {
         yield return (ChineseLanguageCheckBox, "zh");
@@ -1039,16 +1359,16 @@ public partial class MainWindow : Window
 
     private static string GetSelectionPrompt(TranscriptionMode mode) => mode switch
     {
-        TranscriptionMode.QwenLocalHighAccuracy => "选择视频后即可使用本地高精度识别。首次使用请先安装高精度组件。",
-        TranscriptionMode.QwenSdkHighAccuracy => "选择视频后即可使用云端高精度识别。首次使用请先安装 SDK 运行组件。",
-        _ => "选择视频后即可完全在本地转写。首次使用需下载模型。"
+        TranscriptionMode.QwenLocalHighAccuracy => "添加媒体文件后即可使用本地高精度识别。首次使用请先安装高精度组件。",
+        TranscriptionMode.QwenSdkHighAccuracy => "添加媒体文件后即可使用云端高精度识别。首次使用请先安装 SDK 运行组件。",
+        _ => "添加媒体文件后即可完全在本地转写。首次使用需下载模型。"
     };
 
     private static string GetReadyDetail(TranscriptionMode mode) => mode switch
     {
-        TranscriptionMode.QwenLocalHighAccuracy => "点击“开始转写”。如尚未安装，请先使用右侧的“安装高精度组件”。",
-        TranscriptionMode.QwenSdkHighAccuracy => "点击“开始转写”。如尚未安装，请先使用右侧的“安装 SDK 运行组件”。",
-        _ => "点击“开始转写”。首次运行会先下载本地模型。"
+        TranscriptionMode.QwenLocalHighAccuracy => "点击“开始转写”后会按队列顺序处理。如尚未安装，请先使用右侧的“安装高精度组件”。",
+        TranscriptionMode.QwenSdkHighAccuracy => "点击“开始转写”后会按队列顺序处理。如尚未安装，请先使用右侧的“安装 SDK 运行组件”。",
+        _ => "点击“开始转写”后会按队列顺序处理。首次运行会先下载本地模型。"
     };
 
     private static string GetPreparationMessage(TranscriptionMode mode) => mode switch
@@ -1262,5 +1582,82 @@ public partial class MainWindow : Window
         var brush = new SolidColorBrush(Color.FromRgb(red, green, blue));
         brush.Freeze();
         return brush;
+    }
+
+    private enum QueueItemState
+    {
+        Queued,
+        Running,
+        Completed,
+        Failed,
+        Cancelled,
+    }
+
+    private sealed class QueueItem : INotifyPropertyChanged
+    {
+        private QueueItemState _state = QueueItemState.Queued;
+        private string _statusText = "排队中";
+
+        public QueueItem(FileInfo file)
+        {
+            SourcePath = file.FullName;
+            FileName = file.Name;
+            Details = $"{file.Extension.TrimStart('.').ToUpperInvariant()} · {FormatFileSize(file.Length)}";
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public string SourcePath { get; }
+
+        public string FileName { get; }
+
+        public string Details { get; }
+
+        public QueueItemState State
+        {
+            get => _state;
+            private set
+            {
+                if (_state == value)
+                {
+                    return;
+                }
+
+                _state = value;
+                OnPropertyChanged(nameof(State));
+            }
+        }
+
+        public string StatusText
+        {
+            get => _statusText;
+            private set
+            {
+                if (string.Equals(_statusText, value, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _statusText = value;
+                OnPropertyChanged(nameof(StatusText));
+            }
+        }
+
+        public void SetState(QueueItemState state, string? detail = null)
+        {
+            State = state;
+            StatusText = state switch
+            {
+                QueueItemState.Queued => "排队中",
+                QueueItemState.Running => string.IsNullOrWhiteSpace(detail) ? "处理中" : $"处理中 · {detail}",
+                QueueItemState.Completed => "已完成",
+                QueueItemState.Failed => string.IsNullOrWhiteSpace(detail) ? "失败" : $"失败 · {detail}",
+                QueueItemState.Cancelled => "已取消",
+                _ => state.ToString(),
+            };
+        }
+
+        private void OnPropertyChanged(string propertyName) =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 }

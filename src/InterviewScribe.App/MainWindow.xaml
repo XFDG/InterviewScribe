@@ -1,7 +1,7 @@
 <Window x:Class="InterviewScribe.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="面试转写助手"
+        Title="MediaScribe 媒体转写助手"
         Width="1120"
         Height="790"
         MinWidth="940"
@@ -26,6 +26,44 @@
             <Setter Property="Padding" Value="12,6" />
             <Setter Property="FontSize" Value="12" />
         </Style>
+        <Style x:Key="QueueItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,0,0,7" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <DataTemplate x:Key="QueueItemTemplate">
+            <Border Background="#FAFBFD" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="{Binding FileName}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding SourcePath}" />
+                        <TextBlock Text="{Binding Details}" Style="{StaticResource CaptionStyle}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <Border Grid.Column="1" Background="{StaticResource PrimarySoftBrush}" CornerRadius="10" Padding="8,3" Margin="9,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource PrimaryBrush}" FontSize="11" />
+                    </Border>
+                    <Button Grid.Column="2"
+                            Content="移除"
+                            Tag="{Binding}"
+                            Style="{StaticResource TinyButtonStyle}"
+                            Padding="8,3"
+                            Margin="7,0,0,0"
+                            VerticalAlignment="Center"
+                            Click="RemoveQueueItem_Click" />
+                </Grid>
+            </Border>
+        </DataTemplate>
     </Window.Resources>
 
     <Grid Background="{StaticResource PageBackgroundBrush}">
@@ -48,8 +86,8 @@
                                Margin="2" />
                     </Border>
                     <StackPanel>
-                        <TextBlock Text="面试转写助手" Foreground="White" FontSize="22" FontWeight="SemiBold" />
-                        <TextBlock Text="视频 → 说话人、时间轴和多语言文字" Foreground="#BFC8DD" FontSize="12" Margin="0,4,0,0" />
+                        <TextBlock Text="MediaScribe" Foreground="White" FontSize="22" FontWeight="SemiBold" />
+                        <TextBlock Text="媒体文件 → 说话人、时间轴和多语言文字" Foreground="#BFC8DD" FontSize="12" Margin="0,4,0,0" />
                     </StackPanel>
                 </StackPanel>
                 <Border Grid.Column="1" Background="#20304F" CornerRadius="15" Padding="13,7" VerticalAlignment="Center">
@@ -78,12 +116,12 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="1  选择录屏" Style="{StaticResource SectionTitleStyle}" />
-                                    <TextBlock Text="支持常见视频和音频格式；一次处理一个文件。" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" />
+                                    <TextBlock Text="1  添加媒体文件" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock Text="支持常见视频和音频格式；可一次添加多个文件，按顺序处理。" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" />
                                 </StackPanel>
                                 <Button x:Name="ChangeFileButton"
                                         Grid.Column="1"
-                                        Content="选择文件"
+                                        Content="添加文件"
                                         Style="{StaticResource TinyButtonStyle}"
                                         Click="BrowseFile_Click" />
                             </Grid>
@@ -107,7 +145,7 @@
                                                        HorizontalAlignment="Center"
                                                        VerticalAlignment="Center" />
                                         </Border>
-                                        <TextBlock Text="把视频拖到这里，或点击选择"
+                                        <TextBlock Text="把视频或音频拖到这里，可一次选择多个"
                                                    FontSize="14"
                                                    FontWeight="SemiBold"
                                                    HorizontalAlignment="Center"
@@ -142,11 +180,34 @@
                                                        Margin="0,5,0,0" />
                                         </StackPanel>
                                         <Border Grid.Column="2" Background="{StaticResource SuccessSoftBrush}" CornerRadius="12" Padding="10,5" Margin="14,0,0,0" VerticalAlignment="Center">
-                                            <TextBlock Text="已选择" Foreground="{StaticResource SuccessBrush}" FontSize="12" FontWeight="SemiBold" />
+                                            <TextBlock x:Name="SelectedFileStatusText" Text="已加入队列" Foreground="{StaticResource SuccessBrush}" FontSize="12" FontWeight="SemiBold" />
                                         </Border>
                                     </Grid>
                                 </Grid>
                             </Border>
+
+                            <Grid x:Name="QueueHeaderPanel" Margin="0,15,0,0" Visibility="Collapsed">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="QueueSummaryText" Style="{StaticResource CaptionStyle}" VerticalAlignment="Center" />
+                                <Button x:Name="ClearQueueButton"
+                                        Grid.Column="1"
+                                        Content="清空队列"
+                                        Style="{StaticResource TinyButtonStyle}"
+                                        Click="ClearQueue_Click" />
+                            </Grid>
+                            <ListBox x:Name="QueueListBox"
+                                     Margin="0,8,0,0"
+                                     MaxHeight="180"
+                                     Visibility="Collapsed"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     ItemTemplate="{StaticResource QueueItemTemplate}"
+                                     ItemContainerStyle="{StaticResource QueueItemStyle}"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
 
                             <TextBlock Text="输出位置" FontSize="13" FontWeight="SemiBold" Margin="0,19,0,7" />
                             <Grid>
@@ -181,7 +242,7 @@
                                             <TextBlock x:Name="StatusBadgeText" Text="等待开始" FontSize="11" Foreground="{StaticResource MutedBrush}" />
                                         </Border>
                                     </StackPanel>
-                                    <TextBlock x:Name="StatusTitleText" Text="选择视频后即可开始" FontSize="14" FontWeight="SemiBold" Margin="0,15,0,0" />
+                                    <TextBlock x:Name="StatusTitleText" Text="添加媒体文件后即可开始" FontSize="14" FontWeight="SemiBold" Margin="0,15,0,0" />
                                     <TextBlock x:Name="StatusDetailText"
                                                Text="首次使用需要下载约 1 GB 的本地模型。"
                                                Style="{StaticResource CaptionStyle}"
@@ -224,7 +285,7 @@
                                            Margin="0,0,12,0" />
                                 <Button x:Name="CancelButton"
                                         Grid.Column="1"
-                                        Content="取消"
+                                        Content="取消并停止队列"
                                         Style="{StaticResource DangerButtonStyle}"
                                         Visibility="Collapsed"
                                         Margin="0,0,9,0"
@@ -283,7 +344,7 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Text="3  转写完成" Style="{StaticResource SectionTitleStyle}" Foreground="{StaticResource SuccessBrush}" />
+                                    <TextBlock Text="3  最新转写结果" Style="{StaticResource SectionTitleStyle}" Foreground="{StaticResource SuccessBrush}" />
                                     <TextBlock x:Name="ResultSummaryText" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" />
                                 </StackPanel>
                                 <Button x:Name="OpenResultButton"
@@ -642,7 +703,7 @@
 
         <Border Grid.Row="2" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="34,11">
             <Grid>
-                <TextBlock x:Name="FooterModeText" Text="InterviewScribe · 本地离线转写" Style="{StaticResource CaptionStyle}" />
+                <TextBlock x:Name="FooterModeText" Text="MediaScribe · 本地离线转写" Style="{StaticResource CaptionStyle}" />
                 <TextBlock x:Name="FooterStatusText" Text="就绪" Style="{StaticResource CaptionStyle}" HorizontalAlignment="Right" />
             </Grid>
         </Border>
