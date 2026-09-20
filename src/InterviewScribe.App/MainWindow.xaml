@@ -6,6 +6,7 @@
         Height="790"
         MinWidth="940"
         MinHeight="680"
+        Icon="/Assets/InterviewScribe.ico"
         WindowStartupLocation="CenterScreen"
         AllowDrop="True"
         Loaded="Window_Loaded"
@@ -41,17 +42,14 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Width="42" Height="42" CornerRadius="11" Background="#6568F2" Margin="0,0,14,0">
-                        <TextBlock Text="&#xE8D6;"
-                                   FontFamily="Segoe Fluent Icons"
-                                   FontSize="22"
-                                   Foreground="White"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center" />
+                    <Border Width="42" Height="42" CornerRadius="11" Background="#FFFFFF" Margin="0,0,14,0" ClipToBounds="True">
+                        <Image Source="/Assets/interviewscribe-icon.png"
+                               Stretch="Uniform"
+                               Margin="2" />
                     </Border>
                     <StackPanel>
                         <TextBlock Text="面试转写助手" Foreground="White" FontSize="22" FontWeight="SemiBold" />
-                        <TextBlock Text="视频 → 说话人、时间轴和中英混合文字" Foreground="#BFC8DD" FontSize="12" Margin="0,4,0,0" />
+                        <TextBlock Text="视频 → 说话人、时间轴和多语言文字" Foreground="#BFC8DD" FontSize="12" Margin="0,4,0,0" />
                     </StackPanel>
                 </StackPanel>
                 <Border Grid.Column="1" Background="#20304F" CornerRadius="15" Padding="13,7" VerticalAlignment="Center">
@@ -159,7 +157,7 @@
                                 <TextBox x:Name="OutputFolderTextBox"
                                          IsReadOnly="True"
                                          VerticalContentAlignment="Center"
-                                         ToolTip="TXT、SRT 和 JSON 都会保存到这里" />
+                                         ToolTip="所选的 TXT、Markdown、Word、PDF、SRT、JSON 文件都会保存到这里" />
                                 <Button Grid.Column="1"
                                         Content="更改…"
                                         Style="{StaticResource SecondaryButtonStyle}"
@@ -191,8 +189,8 @@
                                                TextWrapping="Wrap" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" HorizontalAlignment="Right">
-                                    <TextBlock x:Name="ProgressPercentText" Text="" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Right" />
-                                    <TextBlock x:Name="ElapsedText" Text="" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" HorizontalAlignment="Right" />
+                                    <TextBlock x:Name="ProgressPercentText" Text="0%" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                                    <TextBlock x:Name="ElapsedText" Text="等待开始" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" HorizontalAlignment="Right" />
                                 </StackPanel>
                             </Grid>
 
@@ -219,7 +217,7 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="识别阶段不会显示虚假的百分比；耗时随视频长度和电脑性能变化。"
+                                <TextBlock Text="百分比表示全流程完成度；预计剩余时间会在获得足够运行样本后显示。"
                                            Style="{StaticResource CaptionStyle}"
                                            VerticalAlignment="Center"
                                            TextWrapping="Wrap"
@@ -242,7 +240,14 @@
 
                             <Expander x:Name="LogExpander" Margin="0,18,0,0" IsExpanded="False">
                                 <Expander.Header>
-                                    <TextBlock Text="运行记录与诊断" FontSize="12" Foreground="{StaticResource MutedBrush}" />
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="运行记录与诊断" FontSize="12" Foreground="{StaticResource MutedBrush}" />
+                                        <TextBlock x:Name="LogProgressSummaryText"
+                                                   Text="0% · 等待开始"
+                                                   FontSize="12"
+                                                   Foreground="{StaticResource PrimaryBrush}"
+                                                   Margin="12,0,0,0" />
+                                    </StackPanel>
                                 </Expander.Header>
                                 <Grid Margin="0,10,0,0">
                                     <Grid.RowDefinitions>
@@ -281,12 +286,12 @@
                                     <TextBlock Text="3  转写完成" Style="{StaticResource SectionTitleStyle}" Foreground="{StaticResource SuccessBrush}" />
                                     <TextBlock x:Name="ResultSummaryText" Style="{StaticResource CaptionStyle}" Margin="0,5,0,0" />
                                 </StackPanel>
-                                <Button x:Name="OpenTxtButton"
+                                <Button x:Name="OpenResultButton"
                                         Grid.Column="1"
-                                        Content="打开 TXT"
+                                        Content="打开结果"
                                         Style="{StaticResource SecondaryButtonStyle}"
                                         Margin="0,0,9,0"
-                                        Click="OpenTxt_Click" />
+                                        Click="OpenResult_Click" />
                                 <Button Grid.Column="2"
                                         Content="打开文件夹"
                                         Style="{StaticResource PrimaryButtonStyle}"
@@ -317,7 +322,7 @@
                                        FontSize="13"
                                        FontWeight="SemiBold"
                                        Margin="0,17,0,0" />
-                            <StackPanel Orientation="Horizontal" Margin="0,11,0,0">
+                            <UniformGrid Columns="3" Margin="0,11,0,0">
                                 <CheckBox x:Name="ChineseLanguageCheckBox"
                                           Content="中文"
                                           IsChecked="True"
@@ -329,10 +334,54 @@
                                           IsChecked="True"
                                           FontSize="13"
                                           VerticalAlignment="Center"
-                                          Margin="24,0,0,0"
                                           Click="LanguageCheckBox_Click" />
-                            </StackPanel>
-                            <TextBlock Text="中英都选适合混合对话；单选会给模型对应的语言提示。"
+                                <CheckBox x:Name="CantoneseLanguageCheckBox"
+                                          Content="粤语"
+                                          FontSize="13"
+                                          VerticalAlignment="Center"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="JapaneseLanguageCheckBox"
+                                          Content="日本語"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="KoreanLanguageCheckBox"
+                                          Content="한국어"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="FrenchLanguageCheckBox"
+                                          Content="Français"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="GermanLanguageCheckBox"
+                                          Content="Deutsch"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="SpanishLanguageCheckBox"
+                                          Content="Español"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="PortugueseLanguageCheckBox"
+                                          Content="Português"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="RussianLanguageCheckBox"
+                                          Content="Русский"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                                <CheckBox x:Name="ItalianLanguageCheckBox"
+                                          Content="Italiano"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="LanguageCheckBox_Click" />
+                            </UniformGrid>
+                            <TextBlock Text="单选会给本地模型语言提示；多选或 SDK 路径使用自动识别。MOSS 快速模式优先保障中英文；扩展语言请用 Qwen 高精度模式。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="18"
@@ -346,18 +395,65 @@
 
                             <Border Height="1" Background="{StaticResource LineBrush}" Margin="0,18,0,16" />
 
+                            <TextBlock Text="输出格式（可多选）" FontSize="13" FontWeight="SemiBold" />
+                            <UniformGrid Columns="3" Margin="0,11,0,0">
+                                <CheckBox x:Name="TxtOutputCheckBox"
+                                          Content="TXT"
+                                          IsChecked="True"
+                                          FontSize="13"
+                                          Click="OutputFormatCheckBox_Click" />
+                                <CheckBox x:Name="MarkdownOutputCheckBox"
+                                          Content="Markdown"
+                                          FontSize="13"
+                                          Click="OutputFormatCheckBox_Click" />
+                                <CheckBox x:Name="DocxOutputCheckBox"
+                                          Content="Word"
+                                          FontSize="13"
+                                          Click="OutputFormatCheckBox_Click" />
+                                <CheckBox x:Name="PdfOutputCheckBox"
+                                          Content="PDF"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="OutputFormatCheckBox_Click" />
+                                <CheckBox x:Name="SrtOutputCheckBox"
+                                          Content="SRT"
+                                          IsChecked="True"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="OutputFormatCheckBox_Click" />
+                                <CheckBox x:Name="JsonOutputCheckBox"
+                                          Content="JSON"
+                                          IsChecked="True"
+                                          FontSize="13"
+                                          Margin="0,9,0,0"
+                                          Click="OutputFormatCheckBox_Click" />
+                            </UniformGrid>
+                            <TextBlock x:Name="OutputFormatValidationText"
+                                       Text="请至少选择一种输出格式。"
+                                       Foreground="{StaticResource DangerBrush}"
+                                       FontSize="12"
+                                       Margin="0,7,0,0"
+                                       Visibility="Collapsed" />
+                            <TextBlock Text="Word 输出为 DOCX；PDF 会嵌入系统中文字体。SRT 始终保留字幕时间码，JSON 始终保留完整结构。"
+                                       Style="{StaticResource CaptionStyle}"
+                                       TextWrapping="Wrap"
+                                       LineHeight="18"
+                                       Margin="0,8,0,0" />
+
+                            <Border Height="1" Background="{StaticResource LineBrush}" Margin="0,18,0,16" />
+
                             <TextBlock Text="文件内容" FontSize="13" FontWeight="SemiBold" />
                             <CheckBox x:Name="IncludeTimelineCheckBox"
-                                      Content="TXT 包含时间轴"
+                                      Content="可读文档包含时间轴"
                                       IsChecked="True"
                                       FontSize="13"
                                       Margin="0,12,0,0" />
                             <CheckBox x:Name="IncludeSpeakersCheckBox"
-                                      Content="TXT / SRT 标注说话人"
+                                      Content="可读文档 / SRT 标注说话人"
                                       IsChecked="True"
                                       FontSize="13"
                                       Margin="0,11,0,0" />
-                            <TextBlock Text="SRT 会按字幕规范保留时间码；JSON 始终保留完整结构。"
+                            <TextBlock Text="时间轴与说话人选项会同时应用于 TXT、Markdown、Word 和 PDF；SRT 只受说话人开关影响。"
                                        Style="{StaticResource CaptionStyle}"
                                        TextWrapping="Wrap"
                                        LineHeight="18"
@@ -484,7 +580,7 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SuccessBrush}" FontSize="14" />
-                                <TextBlock Grid.Column="1" Text="中文、英文和中英混说" FontSize="12" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="11 种语言可选，支持多语言混说" FontSize="12" TextWrapping="Wrap" />
                             </Grid>
                             <Grid Margin="0,11,0,0">
                                 <Grid.ColumnDefinitions>
@@ -500,7 +596,7 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="&#xE73E;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource SuccessBrush}" FontSize="14" />
-                                <TextBlock Grid.Column="1" Text="输出 TXT、SRT 和结构化 JSON" FontSize="12" TextWrapping="Wrap" />
+                                <TextBlock Grid.Column="1" Text="TXT / MD / Word / PDF / SRT / JSON 可多选" FontSize="12" TextWrapping="Wrap" />
                             </Grid>
                         </StackPanel>
                     </Border>

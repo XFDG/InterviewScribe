@@ -48,6 +48,23 @@ Qwen 模型权重、Python 运行环境及其包不随 InterviewScribe 安装包
 
 自包含发布会携带 Microsoft .NET 运行时组件。相关许可与声明见：<https://github.com/dotnet/runtime/blob/main/LICENSE.TXT> 和 <https://dotnet.microsoft.com/platform/free>。
 
+## PDFsharp-GDI 6.2.4
+
+- 项目：PDFsharp
+- 许可证：MIT
+- 源码：<https://github.com/empira/PDFsharp>
+- 文档：<https://docs.pdfsharp.net/>
+
+PDF 导出使用 PDFsharp 的 Windows GDI 构建，并将转写中用到的 Unicode 字形子集嵌入生成的 PDF，以避免换机后出现乱码。
+
+Copyright (c) 2001-2026 empira Software GmbH, Troisdorf (Cologne Area), Germany
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ---
 
 本文件仅用于保留第三方归属与再分发信息，不改变任何上游项目的许可条款。

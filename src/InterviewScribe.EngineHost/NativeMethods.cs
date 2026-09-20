@@ -38,12 +38,28 @@ internal static class NativeMethods
         On = 2,
     }
 
+    public enum KvType
+    {
+        Auto = 0,
+        F32 = 1,
+        F16 = 2,
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct ModelLoadParams
     {
         public ulong StructSize;
         public BackendRequest Backend;
         public IntPtr Device;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SessionParams
+    {
+        public ulong StructSize;
+        public int ThreadCount;
+        public KvType KvType;
+        public int ContextTokens;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -110,6 +126,7 @@ internal static class NativeMethods
     public static void VerifyAbi()
     {
         VerifyStructSize(0, Unsafe.SizeOf<ModelLoadParams>(), nameof(ModelLoadParams));
+        VerifyStructSize(1, Unsafe.SizeOf<SessionParams>(), nameof(SessionParams));
         VerifyStructSize(2, Unsafe.SizeOf<RunParams>(), nameof(RunParams));
         VerifyStructSize(6, Unsafe.SizeOf<Segment>(), nameof(Segment));
     }
@@ -158,6 +175,9 @@ internal static class NativeMethods
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "transcribe_model_load_params_init")]
     internal static extern void TranscribeModelLoadParamsInit(ref ModelLoadParams parameters);
 
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "transcribe_session_params_init")]
+    internal static extern void TranscribeSessionParamsInit(ref SessionParams parameters);
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "transcribe_run_params_init")]
     internal static extern void TranscribeRunParamsInit(ref RunParams parameters);
 
@@ -168,7 +188,7 @@ internal static class NativeMethods
     internal static extern Status TranscribeOpen(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
         ref ModelLoadParams loadParameters,
-        IntPtr sessionParameters,
+        ref SessionParams sessionParameters,
         out IntPtr session);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "transcribe_session_free")]

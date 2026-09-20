@@ -28,8 +28,17 @@ internal static class Program
             NativeMethods.TranscribeModelLoadParamsInit(ref loadParams);
             loadParams.Backend = options.Backend;
 
+            var sessionParams = default(NativeMethods.SessionParams);
+            NativeMethods.TranscribeSessionParamsInit(ref sessionParams);
+            if (options.ContextTokens is int contextTokens)
+            {
+                sessionParams.ContextTokens = contextTokens;
+                EmitDiagnostic(
+                    $"已启用 {contextTokens:N0}-token 显存保护；若无法完整识别，主程序会自动改用 CPU 完整重试。");
+            }
+
             Check(
-                NativeMethods.TranscribeOpen(options.ModelPath, ref loadParams, IntPtr.Zero, out var session),
+                NativeMethods.TranscribeOpen(options.ModelPath, ref loadParams, ref sessionParams, out var session),
                 "加载模型");
 
             try
@@ -177,6 +186,11 @@ internal static class Program
     {
         Console.Error.WriteLine(JsonSerializer.Serialize(new { type, message, fraction }));
     }
+
+    private static void EmitDiagnostic(string message)
+    {
+        Console.Error.WriteLine(JsonSerializer.Serialize(new { type = "native", message }));
+    }
 }
 
 internal sealed class EngineException(string message, int? nativeStatus = null) : Exception(message)
@@ -205,7 +219,8 @@ internal sealed record Arguments(
     string AudioPath,
     string OutputPath,
     NativeMethods.BackendRequest Backend,
-    string? Language)
+    string? Language,
+    int? ContextTokens)
 {
     public static Arguments Parse(string[] args)
     {
@@ -213,7 +228,7 @@ internal sealed record Arguments(
         {
             throw new EngineException(
                 "用法：InterviewScribe.EngineHost --runtime <dir> --model <gguf> --audio <wav> --output <json> " +
-                "[--backend auto|cuda|vulkan|cpu] [--language auto|zh|en]");
+                "[--backend auto|cuda|vulkan|cpu] [--language auto|zh|en] [--context-tokens 65536]");
         }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -256,6 +271,7 @@ internal sealed record Arguments(
             _ => throw new EngineException($"不支持的推理后端：{backendName}"),
         };
         var language = ResolveNativeLanguage(values.GetValueOrDefault("--language", "auto"));
+        var contextTokens = ResolveContextTokens(values.GetValueOrDefault("--context-tokens"));
 
         return new Arguments(
             Path.GetFullPath(runtime),
@@ -263,7 +279,8 @@ internal sealed record Arguments(
             Path.GetFullPath(audio),
             Path.GetFullPath(output),
             backend,
-            language);
+            language,
+            contextTokens);
     }
 
     internal static string? ResolveNativeLanguage(string languageName) =>
@@ -275,6 +292,21 @@ internal sealed record Arguments(
             _ => throw new EngineException(
                 $"不支持的识别语言：{languageName}。请使用 auto、zh 或 en。"),
         };
+
+    internal static int? ResolveContextTokens(string? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (!int.TryParse(value, out var contextTokens) || contextTokens is < 1024 or > 131072)
+        {
+            throw new EngineException("上下文 token 上限必须是 1024 到 131072 之间的整数。");
+        }
+
+        return contextTokens;
+    }
 
     private static string Required(IReadOnlyDictionary<string, string> values, string name) =>
         values.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)

@@ -611,6 +611,23 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(10, args.sdk_segment_seconds)
         self.assertEqual(2, args.sdk_workers)
 
+    def test_parser_accepts_every_ui_language(self) -> None:
+        for language in ("zh", "en", "yue", "ja", "ko", "fr", "de", "es", "pt", "ru", "it"):
+            with self.subTest(language=language):
+                args = sidecar._build_parser().parse_args(
+                    [
+                        "--mode",
+                        "sdk",
+                        "--audio",
+                        "input.wav",
+                        "--output",
+                        "output.json",
+                        "--language",
+                        language,
+                    ]
+                )
+                self.assertEqual(language, args.language)
+
     def test_explicit_zero_is_rejected_instead_of_defaulted(self) -> None:
         args = self.parse("--sdk-workers", "0")
         with self.assertRaisesRegex(sidecar.UserFacingError, "1\u20138"):

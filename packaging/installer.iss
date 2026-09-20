@@ -1,5 +1,5 @@
 ﻿#ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.4.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\artifacts\package\InterviewScribe"
@@ -34,6 +34,7 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile={#SourceDir}\Assets\InterviewScribe.ico
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
@@ -54,8 +55,8 @@ Name: "desktopicon"; Description: "{cm:DesktopShortcutTask}"; GroupDescription: 
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\InterviewScribe.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\Assets\InterviewScribe.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

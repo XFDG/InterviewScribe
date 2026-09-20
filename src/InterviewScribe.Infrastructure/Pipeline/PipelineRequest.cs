@@ -7,6 +7,7 @@ public sealed record PipelineRequest(string SourcePath, string OutputDirectory)
 {
     public IReadOnlyList<string> LanguageCodes { get; init; } = ["zh", "en"];
     public TranscriptFormattingOptions FormattingOptions { get; init; } = TranscriptFormattingOptions.Default;
+    public TranscriptOutputFormat OutputFormats { get; init; } = TranscriptOutputFormat.Default;
     public TranscriptionMode Mode { get; init; } = TranscriptionMode.MossLocalFast;
 
     // Kept in memory for this run only. The UI never persists or logs this value,
@@ -15,12 +16,14 @@ public sealed record PipelineRequest(string SourcePath, string OutputDirectory)
 }
 
 public sealed record PipelineResult(
-    string TxtPath,
-    string SrtPath,
-    string JsonPath,
+    string? TxtPath,
+    string? SrtPath,
+    string? JsonPath,
     TranscriptDocument Document,
     IReadOnlyList<string> LogMessages,
     string OutputDirectory)
 {
     public TranscriptFormattingOptions FormattingOptions { get; init; } = TranscriptFormattingOptions.Default;
+    public IReadOnlyDictionary<TranscriptOutputFormat, string> OutputPaths { get; init; } =
+        new Dictionary<TranscriptOutputFormat, string>();
 }

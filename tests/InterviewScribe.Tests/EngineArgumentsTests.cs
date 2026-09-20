@@ -46,6 +46,33 @@ public sealed class EngineArgumentsTests
         Assert.Contains("启动参数不完整", exception.Message);
     }
 
+    [Fact]
+    public void Parse_MapsOptionalContextTokenCap()
+    {
+        using var files = new EngineArgumentFiles();
+
+        var parsed = Arguments.Parse(files.CreateArguments(null, 65_536));
+
+        Assert.Equal(65_536, parsed.ContextTokens);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("1023")]
+    [InlineData("131073")]
+    [InlineData("not-a-number")]
+    public void Parse_RejectsUnsafeContextTokenCap(string value)
+    {
+        using var files = new EngineArgumentFiles();
+        var arguments = files.CreateArguments(null)
+            .Concat(["--context-tokens", value])
+            .ToArray();
+
+        var exception = Assert.Throws<EngineException>(() => Arguments.Parse(arguments));
+
+        Assert.Contains("1024 到 131072", exception.Message);
+    }
+
     private sealed class EngineArgumentFiles : IDisposable
     {
         public EngineArgumentFiles()
@@ -74,7 +101,7 @@ public sealed class EngineArgumentsTests
 
         public string OutputPath { get; }
 
-        public string[] CreateArguments(string? languageArgument)
+        public string[] CreateArguments(string? languageArgument, int? contextTokens = null)
         {
             var arguments = new List<string>
             {
@@ -88,6 +115,12 @@ public sealed class EngineArgumentsTests
             {
                 arguments.Add("--language");
                 arguments.Add(languageArgument);
+            }
+
+            if (contextTokens is int value)
+            {
+                arguments.Add("--context-tokens");
+                arguments.Add(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
 
             return arguments.ToArray();

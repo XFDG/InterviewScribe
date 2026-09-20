@@ -11,6 +11,8 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 public sealed class TranscriptionPipeline
 {
     private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(2);
+    private static readonly TimeSpan VulkanProtectedContextMaximumDuration = TimeSpan.FromHours(1);
+    internal const int VulkanProtectedContextTokens = 65_536;
     private const string QwenLocalDisplayName = "Qwen3-ASR-1.7B-hf + MOSS 说话人区分";
     private const string QwenSdkDisplayName = "qwen3-asr-flash SDK + MOSS 说话人区分";
 
@@ -43,7 +45,8 @@ public sealed class TranscriptionPipeline
     public async Task<PipelineResult> RunAsync(
         PipelineRequest request,
         IProgress<OperationProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<string>? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var languageSelection = LanguageSelection.FromCodes(request.LanguageCodes);
@@ -60,6 +63,13 @@ public sealed class TranscriptionPipeline
         {
             throw new ArgumentOutOfRangeException(nameof(request), "不支持所选的识别模式。");
         }
+        if (request.OutputFormats == TranscriptOutputFormat.None ||
+            (request.OutputFormats & ~TranscriptOutputFormat.All) != 0)
+        {
+            throw new ArgumentException("请至少选择一种受支持的输出格式。", nameof(request));
+        }
+
+        var progressCoordinator = new PipelineProgressCoordinator(request.Mode, progress);
 
         _paths.EnsureCreated();
         CleanupOldJobs();
@@ -81,9 +91,11 @@ public sealed class TranscriptionPipeline
 
         try
         {
-            progress?.Report(new OperationProgress(
+            progressCoordinator.Report(
+                PipelinePhase.ProbeMedia,
                 JobState.ProbingMedia,
-                "正在读取视频时长和音轨…"));
+                "正在读取视频时长和音轨…",
+                0);
             var mediaInfo = await _mediaProcessor.ProbeAsync(
                 ffprobePath,
                 sourcePath,
@@ -97,33 +109,50 @@ public sealed class TranscriptionPipeline
                     $"所选文件时长为 {FormatDuration(mediaInfo.Duration)}，请先分段后再识别，以避免内存耗尽。");
             }
 
+            progressCoordinator.Report(
+                PipelinePhase.ProbeMedia,
+                JobState.ProbingMedia,
+                "视频信息读取完成。",
+                1);
             AddLog(
                 logMessages,
-                $"已检测音轨：{mediaInfo.AudioStreamCount} 路，{mediaInfo.CodecName}，{mediaInfo.SampleRate} Hz，{mediaInfo.Channels} 声道，时长 {FormatDuration(mediaInfo.Duration)}。");
+                $"已检测音轨：{mediaInfo.AudioStreamCount} 路，{mediaInfo.CodecName}，{mediaInfo.SampleRate} Hz，{mediaInfo.Channels} 声道，时长 {FormatDuration(mediaInfo.Duration)}。",
+                diagnostics);
             if (mediaInfo.AudioStreamCount > 1)
             {
-                AddLog(logMessages, $"已合并 {mediaInfo.AudioStreamCount} 路音轨，避免遗漏麦克风或系统声音。");
+                AddLog(logMessages, $"已合并 {mediaInfo.AudioStreamCount} 路音轨，避免遗漏麦克风或系统声音。", diagnostics);
             }
 
             // Validate the media before a first-run model download. Bad, silent or
             // over-limit input should fail quickly without consuming ~1 GB of data.
-            progress?.Report(new OperationProgress(
+            progressCoordinator.Report(
+                PipelinePhase.PrepareModel,
                 JobState.WaitingForModel,
-                "正在检查 MOSS 本地模型…"));
+                "正在检查 MOSS 本地模型…",
+                0);
 
             string modelPath;
             using (var modelStore = new ModelStore())
             {
-                modelPath = await modelStore.EnsureAsync(_paths, progress, cancellationToken).ConfigureAwait(false);
+                modelPath = await modelStore.EnsureAsync(
+                    _paths,
+                    progressCoordinator.ForPhase(PipelinePhase.PrepareModel),
+                    cancellationToken).ConfigureAwait(false);
             }
 
-            AddLog(logMessages, $"模型已校验：{Path.GetFileName(modelPath)}");
+            progressCoordinator.Report(
+                PipelinePhase.PrepareModel,
+                JobState.VerifyingModel,
+                "MOSS 本地模型已校验。",
+                1);
+            AddLog(logMessages, $"模型已校验：{Path.GetFileName(modelPath)}", diagnostics);
             cancellationToken.ThrowIfCancellationRequested();
 
-            progress?.Report(new OperationProgress(
+            progressCoordinator.Report(
+                PipelinePhase.ExtractAudio,
                 JobState.ExtractingAudio,
                 "正在从视频提取 16 kHz 单声道音频…",
-                0));
+                0);
             await _mediaProcessor.ExtractMonoPcmAsync(
                 ffmpegPath,
                 sourcePath,
@@ -131,19 +160,35 @@ public sealed class TranscriptionPipeline
                 mediaInfo.Duration,
                 mediaInfo.AudioStreamCount,
                 jobDirectory,
-                progress,
+                progressCoordinator.ForPhase(PipelinePhase.ExtractAudio),
                 cancellationToken).ConfigureAwait(false);
 
-            AddLog(logMessages, "音轨提取完成；原视频未被修改。");
+            progressCoordinator.Report(
+                PipelinePhase.ExtractAudio,
+                JobState.ExtractingAudio,
+                "音轨提取完成。",
+                1);
+            AddLog(logMessages, "音轨提取完成；原视频未被修改。", diagnostics);
             cancellationToken.ThrowIfCancellationRequested();
 
-            progress?.Report(new OperationProgress(
+            progressCoordinator.Report(
+                PipelinePhase.MossDiarization,
                 JobState.ReadyToTranscribe,
-                "正在初始化显卡推理…"));
+                "正在初始化显卡推理…",
+                0);
 
             EngineRunOutcome engineRun;
             try
             {
+                var vulkanContextTokens = GetVulkanContextTokenCap(mediaInfo.Duration);
+                if (vulkanContextTokens is int contextTokens)
+                {
+                    AddLog(
+                        logMessages,
+                        $"GPU 优先：已为 Vulkan 启用 {contextTokens:N0}-token 显存保护；若无法保证完整输出，将自动用 CPU 完整重试。",
+                        diagnostics);
+                }
+
                 engineRun = await RunEngineAsync(
                     "vulkan",
                     languageSelection,
@@ -153,17 +198,22 @@ public sealed class TranscriptionPipeline
                     wavPath,
                     mossResultPath,
                     jobDirectory,
-                    progress,
+                    vulkanContextTokens,
+                    progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
+                    diagnostics,
                     cancellationToken).ConfigureAwait(false);
-                AddLog(logMessages, $"识别后端：Vulkan（耗时 {FormatDuration(engineRun.Elapsed)}）。");
+                AddLog(logMessages, $"识别后端：Vulkan GPU（耗时 {FormatDuration(engineRun.Elapsed)}）。", diagnostics);
             }
             catch (EngineRunException vulkanException) when (!cancellationToken.IsCancellationRequested)
             {
-                AddLog(logMessages, $"Vulkan 未能完成识别：{vulkanException.CleanMessage}");
-                AddLog(logMessages, "已自动切换到 CPU 后端重试。");
-                progress?.Report(new OperationProgress(
+                AddLog(logMessages, $"Vulkan 未能完成识别：{vulkanException.CleanMessage}", diagnostics);
+                AddLog(logMessages, "已自动切换到 CPU 后端重试。", diagnostics);
+                progressCoordinator.ResetEta();
+                progressCoordinator.Report(
+                    PipelinePhase.MossDiarization,
                     JobState.ReadyToTranscribe,
-                    "显卡推理不可用，正在切换到 CPU…"));
+                    "显卡推理不可用，正在切换到 CPU；剩余时间将重新估算。",
+                    0);
 
                 TryDelete(mossResultPath);
                 TryDelete(mossResultPath + ".tmp");
@@ -178,9 +228,11 @@ public sealed class TranscriptionPipeline
                         wavPath,
                         mossResultPath,
                         jobDirectory,
-                        progress,
+                        null,
+                        progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
+                        diagnostics,
                         cancellationToken).ConfigureAwait(false);
-                    AddLog(logMessages, $"识别后端：CPU（耗时 {FormatDuration(engineRun.Elapsed)}）。");
+                    AddLog(logMessages, $"识别后端：CPU 回退（耗时 {FormatDuration(engineRun.Elapsed)}）。", diagnostics);
                 }
                 catch (EngineRunException cpuException)
                 {
@@ -191,9 +243,11 @@ public sealed class TranscriptionPipeline
                 }
             }
 
-            progress?.Report(new OperationProgress(
-                JobState.ValidatingResult,
-                "正在检查说话人、时间轴和结果完整性…"));
+            progressCoordinator.Report(
+                PipelinePhase.MossDiarization,
+                JobState.Transcribing,
+                "正在检查 MOSS 说话人轨道…",
+                1);
             var mossResult = await ReadEngineResultAsync(mossResultPath, cancellationToken).ConfigureAwait(false);
             TranscriptDocument document;
             if (request.Mode == TranscriptionMode.MossLocalFast)
@@ -224,11 +278,13 @@ public sealed class TranscriptionPipeline
                     qwenResultPath,
                     mossResultPath,
                     jobDirectory,
-                    progress,
+                    progressCoordinator.ForPhase(PipelinePhase.QwenRecognition),
+                    diagnostics,
                     cancellationToken).ConfigureAwait(false);
                 AddLog(
                     logMessages,
-                    $"Qwen 高精度识别完成（耗时 {FormatDuration(highAccuracyRun.Elapsed)}）。");
+                    $"Qwen 高精度识别完成（耗时 {FormatDuration(highAccuracyRun.Elapsed)}）。",
+                    diagnostics);
 
                 var qwenResult = await ReadEngineResultAsync(qwenResultPath, cancellationToken).ConfigureAwait(false);
                 var mergedResult = MergeHighAccuracyResults(request.Mode, qwenResult, mossResult);
@@ -241,21 +297,48 @@ public sealed class TranscriptionPipeline
                     modelRevision);
             }
 
+            progressCoordinator.Report(
+                PipelinePhase.Validate,
+                JobState.ValidatingResult,
+                "正在检查说话人、时间轴和结果完整性…",
+                0);
             AddLog(
                 logMessages,
-                $"识别完成：{document.Segments.Count} 个时间段，{document.Segments.Where(item => item.SpeakerId > 0).Select(item => item.SpeakerId).Distinct().Count()} 位说话人。");
+                $"识别完成：{document.Segments.Count} 个时间段，{document.Segments.Where(item => item.SpeakerId > 0).Select(item => item.SpeakerId).Distinct().Count()} 位说话人。",
+                diagnostics);
+            progressCoordinator.Report(
+                PipelinePhase.Validate,
+                JobState.ValidatingResult,
+                "结果完整性检查通过。",
+                1);
 
-            progress?.Report(new OperationProgress(
+            progressCoordinator.Report(
+                PipelinePhase.Export,
                 JobState.Exporting,
-                "正在安全写入 TXT、SRT 和 JSON…"));
+                "正在安全写入所选输出格式…",
+                0);
             var exported = await AtomicTranscriptExporter.ExportAsync(
                 document,
                 outputDirectory,
+                request.OutputFormats,
                 cancellationToken,
                 formattingOptions).ConfigureAwait(false);
 
-            AddLog(logMessages, $"结果已保存：{exported.TxtPath}");
+            progressCoordinator.Report(
+                PipelinePhase.Export,
+                JobState.Exporting,
+                "所选输出文件已安全保存。",
+                1);
+            foreach (var path in exported.Paths.Values)
+            {
+                AddLog(logMessages, $"结果已保存：{path}", diagnostics);
+            }
             succeeded = true;
+            progressCoordinator.Report(
+                PipelinePhase.Completed,
+                JobState.Completed,
+                "转写与导出完成。",
+                1);
             return new PipelineResult(
                 exported.TxtPath,
                 exported.SrtPath,
@@ -265,6 +348,7 @@ public sealed class TranscriptionPipeline
                 outputDirectory)
             {
                 FormattingOptions = formattingOptions,
+                OutputPaths = exported.Paths,
             };
         }
         finally
@@ -289,17 +373,20 @@ public sealed class TranscriptionPipeline
         string wavPath,
         string resultPath,
         string jobDirectory,
+        int? contextTokens,
         IProgress<OperationProgress>? progress,
+        IProgress<string>? diagnostics,
         CancellationToken cancellationToken)
     {
         progress?.Report(new OperationProgress(
             JobState.Transcribing,
             backend == "vulkan"
-                ? "正在本地识别中英文并区分说话人…"
+                ? "正在本地识别语音并区分说话人…"
                 : "正在使用 CPU 识别，速度会慢一些…"));
 
         var logPrefix = backend == "vulkan" ? "engine-vulkan" : "engine-cpu";
         string? lastProgressMessage = null;
+        double? lastProgressFraction = null;
         var result = await _processRunner.RunAsync(
             new ProcessSpec
             {
@@ -311,24 +398,37 @@ public sealed class TranscriptionPipeline
                     wavPath,
                     resultPath,
                     backend,
-                    languageSelection),
+                    languageSelection,
+                    contextTokens),
                 StandardOutputLogPath = Path.Combine(jobDirectory, logPrefix + ".stdout.log"),
                 StandardErrorLogPath = Path.Combine(jobDirectory, logPrefix + ".stderr.log"),
             },
             onStandardError: line =>
             {
                 var engineEvent = TryParseEngineEvent(line);
-                if (engineEvent is not { Type: "progress" } ||
-                    string.IsNullOrWhiteSpace(engineEvent.Message) ||
-                    string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal))
+                if (engineEvent is { Type: "native" } && !string.IsNullOrWhiteSpace(engineEvent.Message))
+                {
+                    diagnostics?.Report($"MOSS 原生运行库：{engineEvent.Message.Trim()}");
+                    return;
+                }
+
+                if (engineEvent is not { Type: "progress" } || string.IsNullOrWhiteSpace(engineEvent.Message))
+                {
+                    return;
+                }
+
+                if (string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal) &&
+                    Nullable.Equals(lastProgressFraction, engineEvent.Fraction))
                 {
                     return;
                 }
 
                 lastProgressMessage = engineEvent.Message;
+                lastProgressFraction = engineEvent.Fraction;
                 progress?.Report(new OperationProgress(
                     JobState.Transcribing,
-                    engineEvent.Message.Trim()));
+                    engineEvent.Message.Trim(),
+                    engineEvent.Fraction));
             },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -386,6 +486,7 @@ public sealed class TranscriptionPipeline
         string mossResultPath,
         string jobDirectory,
         IProgress<OperationProgress>? progress,
+        IProgress<string>? diagnostics,
         CancellationToken cancellationToken)
     {
         var isLocal = mode == TranscriptionMode.QwenLocalHighAccuracy;
@@ -413,6 +514,7 @@ public sealed class TranscriptionPipeline
         }
 
         string? lastProgressMessage = null;
+        double? lastProgressFraction = null;
         var result = await _processRunner.RunAsync(
             new ProcessSpec
             {
@@ -434,15 +536,23 @@ public sealed class TranscriptionPipeline
             onStandardError: line =>
             {
                 var engineEvent = TryParseEngineEvent(line);
-                if (engineEvent is not { Type: "progress" } ||
-                    string.IsNullOrWhiteSpace(engineEvent.Message) ||
-                    string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal))
+                if (engineEvent is not { Type: "progress" } || string.IsNullOrWhiteSpace(engineEvent.Message))
+                {
+                    return;
+                }
+
+                if (string.Equals(lastProgressMessage, engineEvent.Message, StringComparison.Ordinal) &&
+                    Nullable.Equals(lastProgressFraction, engineEvent.Fraction))
                 {
                     return;
                 }
 
                 lastProgressMessage = engineEvent.Message;
-                progress?.Report(new OperationProgress(JobState.Transcribing, engineEvent.Message.Trim()));
+                lastProgressFraction = engineEvent.Fraction;
+                progress?.Report(new OperationProgress(
+                    JobState.Transcribing,
+                    engineEvent.Message.Trim(),
+                    engineEvent.Fraction));
             },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -588,20 +698,41 @@ public sealed class TranscriptionPipeline
         string wavPath,
         string resultPath,
         string backend,
-        LanguageSelection languageSelection)
+        LanguageSelection languageSelection,
+        int? contextTokens = null)
     {
         ArgumentNullException.ThrowIfNull(languageSelection);
 
-        return
-        [
+        var arguments = new List<string>
+        {
             "--runtime", runtimeDirectory,
             "--model", modelPath,
             "--audio", wavPath,
             "--output", resultPath,
             "--backend", backend,
-            "--language", languageSelection.EngineArgument,
-        ];
+            "--language", languageSelection.MossEngineArgument,
+        };
+
+        if (contextTokens is int value)
+        {
+            if (value is < 1024 or > 131072)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(contextTokens),
+                    "上下文 token 上限必须在 1024 到 131072 之间。");
+            }
+
+            arguments.Add("--context-tokens");
+            arguments.Add(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return arguments;
     }
+
+    internal static int? GetVulkanContextTokenCap(TimeSpan mediaDuration) =>
+        mediaDuration > TimeSpan.Zero && mediaDuration <= VulkanProtectedContextMaximumDuration
+            ? VulkanProtectedContextTokens
+            : null;
 
     private static async Task<EngineResultDto> ReadEngineResultAsync(
         string resultPath,
@@ -857,9 +988,13 @@ public sealed class TranscriptionPipeline
         }
     }
 
-    private static void AddLog(ICollection<string> messages, string message)
+    private static void AddLog(
+        ICollection<string> messages,
+        string message,
+        IProgress<string>? diagnostics)
     {
         messages.Add(message);
+        diagnostics?.Report(message);
     }
 
     private static string FormatDuration(TimeSpan duration)

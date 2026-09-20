@@ -12,6 +12,8 @@ public sealed class TranscriptionPipelineArgumentsTests
     [InlineData("cpu", "en", null, "en")]
     [InlineData("vulkan", "zh", "en", "auto")]
     [InlineData("cpu", "zh", "en", "auto")]
+    [InlineData("vulkan", "ja", null, "auto")]
+    [InlineData("cpu", "fr", null, "auto")]
     public void BuildEngineArguments_UsesSafeLanguageValueForEveryBackend(
         string backend,
         string firstLanguage,
@@ -43,6 +45,66 @@ public sealed class TranscriptionPipelineArgumentsTests
             arguments);
         Assert.Equal(1, arguments.Count(argument => argument == "--language"));
         Assert.DoesNotContain("zh,en", arguments);
+    }
+
+    [Theory]
+    [InlineData("ja")]
+    [InlineData("fr")]
+    [InlineData("yue")]
+    public void BuildQwenArguments_LocalMode_PreservesSupportedExtendedLanguage(string languageCode)
+    {
+        var arguments = TranscriptionPipeline.BuildQwenArguments(
+            TranscriptionMode.QwenLocalHighAccuracy,
+            "qwen_sidecar.py",
+            "asr-model",
+            "aligner-model",
+            "audio.wav",
+            "result.json",
+            null,
+            LanguageSelection.FromCodes([languageCode]));
+
+        var languageIndex = Array.IndexOf(arguments.ToArray(), "--language");
+        Assert.True(languageIndex >= 0);
+        Assert.Equal(languageCode, arguments[languageIndex + 1]);
+    }
+
+    [Fact]
+    public void BuildEngineArguments_VulkanContextCapIsExplicitAndCpuCanUseFullContext()
+    {
+        var language = LanguageSelection.FromCodes(["zh", "en"]);
+
+        var vulkanArguments = TranscriptionPipeline.BuildEngineArguments(
+            "runtime",
+            "model.gguf",
+            "audio.wav",
+            "result.json",
+            "vulkan",
+            language,
+            TranscriptionPipeline.VulkanProtectedContextTokens);
+        var cpuArguments = TranscriptionPipeline.BuildEngineArguments(
+            "runtime",
+            "model.gguf",
+            "audio.wav",
+            "result.json",
+            "cpu",
+            language);
+
+        Assert.Contains("--context-tokens", vulkanArguments);
+        Assert.Contains("65536", vulkanArguments);
+        Assert.DoesNotContain("--context-tokens", cpuArguments);
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(60, true)]
+    [InlineData(61, false)]
+    public void GetVulkanContextTokenCap_OnlyProtectsRecordingsUpToOneHour(
+        int minutes,
+        bool expectedCap)
+    {
+        var result = TranscriptionPipeline.GetVulkanContextTokenCap(TimeSpan.FromMinutes(minutes));
+
+        Assert.Equal(expectedCap, result.HasValue);
     }
 
     [Fact]

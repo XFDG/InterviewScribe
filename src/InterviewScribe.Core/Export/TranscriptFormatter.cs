@@ -100,6 +100,81 @@ public static class TranscriptFormatter
         return builder.ToString();
     }
 
+    public static string ToMarkdown(
+        TranscriptDocument document,
+        IReadOnlyDictionary<int, string>? speakerNames = null,
+        TranscriptFormattingOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        options ??= TranscriptFormattingOptions.Default;
+        var builder = new StringBuilder();
+        builder.AppendLine("# 面试录屏转写");
+        builder.AppendLine();
+        builder.Append("- **文件：** ").AppendLine(EscapeMarkdown(document.SourceFileName));
+        builder.Append("- **时长：** ")
+            .AppendLine(FormatClock((long)document.MediaDuration.TotalMilliseconds, includeMilliseconds: false));
+        builder.Append("- **模型：** ")
+            .Append(EscapeMarkdown(document.ModelName))
+            .Append(" (`")
+            .Append(document.ModelRevision.Replace("`", "\\`", StringComparison.Ordinal))
+            .AppendLine("`)");
+        builder.Append("- **生成时间：** ")
+            .AppendLine(document.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"));
+
+        if (document.IsPartial)
+        {
+            builder.AppendLine("- **状态：** 不完整结果，请勿当作完整转写使用");
+        }
+
+        if (document.Warnings.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("## 注意");
+            builder.AppendLine();
+            foreach (var warning in document.Warnings)
+            {
+                builder.Append("- ").AppendLine(EscapeMarkdown(warning));
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("## 转写内容");
+        builder.AppendLine();
+        foreach (var segment in MergeForReading(document.Segments))
+        {
+            if (options.IncludeTimestamps || options.IncludeSpeakers)
+            {
+                builder.Append("### ");
+                if (options.IncludeTimestamps)
+                {
+                    builder.Append('[')
+                        .Append(FormatClock(segment.StartMs, includeMilliseconds: true))
+                        .Append(" - ")
+                        .Append(FormatClock(segment.EndMs, includeMilliseconds: true))
+                        .Append(']');
+                }
+
+                if (options.IncludeSpeakers)
+                {
+                    if (options.IncludeTimestamps)
+                    {
+                        builder.Append(' ');
+                    }
+
+                    builder.Append(EscapeMarkdown(ResolveSpeakerName(segment.SpeakerId, speakerNames)));
+                }
+
+                builder.AppendLine();
+                builder.AppendLine();
+            }
+
+            builder.AppendLine(segment.Text.Trim());
+            builder.AppendLine();
+        }
+
+        return builder.ToString().TrimEnd() + Environment.NewLine;
+    }
+
     public static string ToJson(TranscriptDocument document) =>
         JsonSerializer.Serialize(document, new JsonSerializerOptions
         {
@@ -185,4 +260,12 @@ public static class TranscriptFormatter
     }
 
     private static bool IsAsciiWordChar(char value) => value is >= '0' and <= '9' or >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static string EscapeMarkdown(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("*", "\\*", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal)
+            .Replace("`", "\\`", StringComparison.Ordinal)
+            .Replace("[", "\\[", StringComparison.Ordinal)
+            .Replace("]", "\\]", StringComparison.Ordinal);
 }

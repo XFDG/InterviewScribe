@@ -17,9 +17,30 @@ public sealed class LanguageSelectionTests
 
         Assert.Equal(expectedCode, selection.NativeLanguageCode);
         Assert.Equal(expectedCode, selection.EngineArgument);
+        Assert.Equal(expectedCode, selection.MossEngineArgument);
         Assert.Equal([expectedCode], selection.Codes);
         Assert.Equal(includesChinese, selection.IncludesChinese);
         Assert.Equal(includesEnglish, selection.IncludesEnglish);
+    }
+
+    [Theory]
+    [InlineData("yue")]
+    [InlineData("ja")]
+    [InlineData("ko")]
+    [InlineData("fr")]
+    [InlineData("de")]
+    [InlineData("es")]
+    [InlineData("pt")]
+    [InlineData("ru")]
+    [InlineData("it")]
+    public void FromCodes_WithExtendedLanguage_ForcesQwenButKeepsMossAutomatic(string languageCode)
+    {
+        var selection = LanguageSelection.FromCodes([languageCode]);
+
+        Assert.Equal(languageCode, selection.NativeLanguageCode);
+        Assert.Equal(languageCode, selection.EngineArgument);
+        Assert.Equal("auto", selection.MossEngineArgument);
+        Assert.Equal([languageCode], selection.Codes);
     }
 
     [Theory]
@@ -33,6 +54,7 @@ public sealed class LanguageSelectionTests
 
         Assert.Null(selection.NativeLanguageCode);
         Assert.Equal("auto", selection.EngineArgument);
+        Assert.Equal("auto", selection.MossEngineArgument);
         Assert.DoesNotContain(',', selection.EngineArgument);
         Assert.True(selection.IncludesChinese);
         Assert.True(selection.IncludesEnglish);
@@ -57,7 +79,7 @@ public sealed class LanguageSelectionTests
     [InlineData(" ")]
     [InlineData("auto")]
     [InlineData("zh,en")]
-    [InlineData("fr")]
+    [InlineData("ar")]
     [InlineData("zh-CN")]
     public void FromCodes_WithUnsupportedLanguage_Throws(string? languageCode)
     {
@@ -83,5 +105,16 @@ public sealed class LanguageSelectionTests
         Assert.Equal(["zh", "en"], selection.Codes);
         Assert.Null(selection.NativeLanguageCode);
         Assert.Equal("auto", selection.EngineArgument);
+    }
+
+    [Fact]
+    public void FromCodes_WithAllLanguages_DeduplicatesIntoStableDisplayOrder()
+    {
+        var selection = LanguageSelection.FromCodes(
+            ["it", "RU", "pt", "es", "de", "fr", "ko", "ja", "yue", "en", "zh", "it"]);
+
+        Assert.Equal(["zh", "en", "yue", "ja", "ko", "fr", "de", "es", "pt", "ru", "it"], selection.Codes);
+        Assert.Equal("auto", selection.EngineArgument);
+        Assert.Equal("auto", selection.MossEngineArgument);
     }
 }

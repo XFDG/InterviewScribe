@@ -19,6 +19,7 @@ namespace InterviewScribe.App;
 public partial class MainWindow : Window
 {
     private const int InstallerAlreadyRunningExitCode = 1618;
+    private const int MaximumVisibleLogCharacters = 1_000_000;
 
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -44,9 +45,14 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _elapsedTimer;
     private TranscriptionPipeline? _pipeline;
     private CancellationTokenSource? _runCancellation;
-    private Stopwatch? _transcriptionStopwatch;
+    private Stopwatch? _taskStopwatch;
+    private DateTimeOffset? _estimatedCompletionAt;
+    private int _lastDisplayedPercentage;
+    private int? _lastLoggedProgressPercentage;
+    private JobState? _lastLoggedProgressState;
+    private string? _lastLoggedProgressMessage;
     private string? _sourcePath;
-    private string? _lastTxtPath;
+    private string? _lastPrimaryOutputPath;
     private string? _lastOutputDirectory;
     private JobState _currentState = JobState.Idle;
     private bool _isRunning;
@@ -179,7 +185,16 @@ public partial class MainWindow : Window
         {
             LanguageValidationText.Visibility = Visibility.Visible;
             ChineseLanguageCheckBox.Focus();
-            ShowFriendlyError("请至少选择中文或 English 中的一种识别语言。", "缺少识别语言");
+            ShowFriendlyError("请至少选择一种识别语言。", "缺少识别语言");
+            return;
+        }
+
+        var outputFormats = GetSelectedOutputFormats();
+        if (outputFormats == TranscriptOutputFormat.None)
+        {
+            OutputFormatValidationText.Visibility = Visibility.Visible;
+            TxtOutputCheckBox.Focus();
+            ShowFriendlyError("请至少选择一种输出格式。", "缺少输出格式");
             return;
         }
 
@@ -196,9 +211,11 @@ public partial class MainWindow : Window
         PrepareForRun();
         AppendLog($"识别方案：{GetTranscriptionModeDisplayName(transcriptionMode)}");
         AppendLog($"识别语言：{FormatSelectedLanguages(languageCodes)}");
-        AppendLog($"TXT 时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人标注：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
+        AppendLog($"输出格式：{FormatOutputFormats(outputFormats)}");
+        AppendLog($"可读文档时间轴：{FormatSwitch(formattingOptions.IncludeTimestamps)}；说话人标注：{FormatSwitch(formattingOptions.IncludeSpeakers)}");
         _runCancellation = new CancellationTokenSource();
         var progress = new Progress<OperationProgress>(UpdateProgress);
+        var diagnostics = new Progress<string>(AppendDiagnosticLog);
 
         try
         {
@@ -207,18 +224,17 @@ public partial class MainWindow : Window
                 Mode = transcriptionMode,
                 SdkApiKey = string.IsNullOrWhiteSpace(sdkApiKey) ? null : sdkApiKey,
                 LanguageCodes = languageCodes,
-                FormattingOptions = formattingOptions
+                FormattingOptions = formattingOptions,
+                OutputFormats = outputFormats,
             };
             _pipeline ??= new TranscriptionPipeline();
-            var result = await _pipeline.RunAsync(request, progress, _runCancellation.Token);
-
-            foreach (var message in result.LogMessages)
-            {
-                AppendLog(message);
-            }
+            var result = await _pipeline.RunAsync(
+                request,
+                progress,
+                _runCancellation.Token,
+                diagnostics);
 
             ShowResult(result);
-            UpdateProgress(new OperationProgress(JobState.Completed, "TXT、SRT 和 JSON 已安全保存。", 1));
         }
         catch (OperationCanceledException)
         {
@@ -235,7 +251,7 @@ public partial class MainWindow : Window
         finally
         {
             _elapsedTimer.Stop();
-            _transcriptionStopwatch?.Stop();
+            _taskStopwatch?.Stop();
             _runCancellation?.Dispose();
             _runCancellation = null;
             _isRunning = false;
@@ -245,7 +261,7 @@ public partial class MainWindow : Window
             RecognitionModePanel.IsEnabled = true;
             CancelButton.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = true;
-            StartButton.IsEnabled = !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage();
+            StartButton.IsEnabled = !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && HasSelectedOutputFormat();
 
             if (_closeAfterCancellation)
             {
@@ -263,7 +279,14 @@ public partial class MainWindow : Window
     {
         var hasSelectedLanguage = HasSelectedLanguage();
         LanguageValidationText.Visibility = hasSelectedLanguage ? Visibility.Collapsed : Visibility.Visible;
-        StartButton.IsEnabled = !_isRunning && !_isInstallingQwen && !string.IsNullOrWhiteSpace(_sourcePath) && hasSelectedLanguage;
+        StartButton.IsEnabled = !_isRunning && !_isInstallingQwen && !string.IsNullOrWhiteSpace(_sourcePath) && hasSelectedLanguage && HasSelectedOutputFormat();
+    }
+
+    private void OutputFormatCheckBox_Click(object sender, RoutedEventArgs e)
+    {
+        var hasSelectedFormat = HasSelectedOutputFormat();
+        OutputFormatValidationText.Visibility = hasSelectedFormat ? Visibility.Collapsed : Visibility.Visible;
+        StartButton.IsEnabled = !_isRunning && !_isInstallingQwen && !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && hasSelectedFormat;
     }
 
     private void TranscriptionMode_Checked(object sender, RoutedEventArgs e)
@@ -440,20 +463,20 @@ public partial class MainWindow : Window
             DropZoneBorder.IsEnabled = !_isRunning;
             SettingsPanel.IsEnabled = !_isRunning;
             RecognitionModePanel.IsEnabled = !_isRunning;
-            StartButton.IsEnabled = !_isRunning && !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage();
+            StartButton.IsEnabled = !_isRunning && !string.IsNullOrWhiteSpace(_sourcePath) && HasSelectedLanguage() && HasSelectedOutputFormat();
         }
     }
 
-    private void OpenTxt_Click(object sender, RoutedEventArgs e)
+    private void OpenResult_Click(object sender, RoutedEventArgs e)
     {
-        var txtPath = _lastTxtPath;
-        if (string.IsNullOrWhiteSpace(txtPath) || !File.Exists(txtPath))
+        var resultPath = _lastPrimaryOutputPath;
+        if (string.IsNullOrWhiteSpace(resultPath) || !File.Exists(resultPath))
         {
-            ShowFriendlyError("找不到 TXT 结果文件。请到输出文件夹中确认文件是否被移动。", "文件不存在");
+            ShowFriendlyError("找不到结果文件。请到输出文件夹中确认文件是否被移动。", "文件不存在");
             return;
         }
 
-        TryOpenWithShell(txtPath);
+        TryOpenWithShell(resultPath);
     }
 
     private void OpenFolder_Click(object sender, RoutedEventArgs e)
@@ -529,9 +552,9 @@ public partial class MainWindow : Window
 
     private void ElapsedTimer_Tick(object? sender, EventArgs e)
     {
-        if (_currentState == JobState.Transcribing && _transcriptionStopwatch is not null)
+        if (_isRunning && _taskStopwatch is not null)
         {
-            ElapsedText.Text = $"已识别 {FormatElapsed(_transcriptionStopwatch.Elapsed)}";
+            UpdateElapsedAndEtaDisplay();
         }
     }
 
@@ -564,9 +587,9 @@ public partial class MainWindow : Window
             EmptyFilePanel.Visibility = Visibility.Collapsed;
             SelectedFilePanel.Visibility = Visibility.Visible;
             OutputFolderTextBox.Text = Path.Combine(file.DirectoryName ?? Environment.CurrentDirectory, "转写结果");
-            StartButton.IsEnabled = HasSelectedLanguage();
+            StartButton.IsEnabled = HasSelectedLanguage() && HasSelectedOutputFormat();
             ResultCard.Visibility = Visibility.Collapsed;
-            _lastTxtPath = null;
+            _lastPrimaryOutputPath = null;
             _lastOutputDirectory = null;
             SetIdleState("准备就绪", GetReadyDetail(GetSelectedTranscriptionMode()), "可以开始");
             AppendLog($"已选择：{file.FullName}");
@@ -581,7 +604,7 @@ public partial class MainWindow : Window
     {
         _isRunning = true;
         _closeAfterCancellation = false;
-        _lastTxtPath = null;
+        _lastPrimaryOutputPath = null;
         _lastOutputDirectory = null;
         ResultCard.Visibility = Visibility.Collapsed;
         PreviewTextBox.Clear();
@@ -593,10 +616,17 @@ public partial class MainWindow : Window
         StartButton.IsEnabled = false;
         CancelButton.IsEnabled = true;
         CancelButton.Visibility = Visibility.Visible;
-        OverallProgressBar.IsIndeterminate = true;
-        ProgressPercentText.Text = string.Empty;
-        ElapsedText.Text = string.Empty;
-        _transcriptionStopwatch = null;
+        OverallProgressBar.IsIndeterminate = false;
+        OverallProgressBar.Value = 0;
+        ProgressPercentText.Text = "0%";
+        ElapsedText.Text = "已用时 00:00 · 正在估算剩余时间";
+        LogProgressSummaryText.Text = "0% · 正在估算剩余时间";
+        _lastDisplayedPercentage = 0;
+        _lastLoggedProgressPercentage = null;
+        _lastLoggedProgressState = null;
+        _lastLoggedProgressMessage = null;
+        _estimatedCompletionAt = null;
+        _taskStopwatch = Stopwatch.StartNew();
         _elapsedTimer.Start();
         AppendLog($"任务开始：{_sourcePath}");
         UpdateProgress(new OperationProgress(JobState.WaitingForModel, GetPreparationMessage(GetSelectedTranscriptionMode())));
@@ -604,59 +634,46 @@ public partial class MainWindow : Window
 
     private void UpdateProgress(OperationProgress progress)
     {
-        if (progress.State == JobState.Transcribing && _currentState != JobState.Transcribing)
-        {
-            _transcriptionStopwatch = Stopwatch.StartNew();
-        }
-
         _currentState = progress.State;
         StatusTitleText.Text = GetStateTitle(progress.State);
         StatusDetailText.Text = progress.Message;
         FooterStatusText.Text = progress.Message;
         ApplyBadge(progress.State);
-        ApplyStageVisuals(progress.State);
+        ApplyStageVisuals(progress.Phase, progress.State);
 
-        if (progress.Fraction is double fraction)
+        if (progress.Fraction is double fraction && double.IsFinite(fraction))
         {
-            var normalized = fraction > 1 ? fraction / 100 : fraction;
-            var percentage = Math.Clamp(normalized * 100, 0, 100);
+            var percentage = (int)Math.Round(Math.Clamp(fraction, 0, 1) * 100, MidpointRounding.AwayFromZero);
+            percentage = Math.Max(_lastDisplayedPercentage, percentage);
+            _lastDisplayedPercentage = percentage;
             OverallProgressBar.IsIndeterminate = false;
             OverallProgressBar.Value = percentage;
-            ProgressPercentText.Text = $"{percentage:0}%";
-        }
-        else
-        {
-            OverallProgressBar.IsIndeterminate = IsIndeterminateState(progress.State);
-            ProgressPercentText.Text = string.Empty;
-            if (!OverallProgressBar.IsIndeterminate)
-            {
-                OverallProgressBar.Value = progress.State == JobState.Completed ? 100 : 0;
-            }
+            ProgressPercentText.Text = $"{percentage}%";
         }
 
-        if (progress.State == JobState.Transcribing)
+        if (progress.State == JobState.Completed)
         {
-            var elapsed = progress.Elapsed ?? _transcriptionStopwatch?.Elapsed;
-            ElapsedText.Text = elapsed is null
-                ? (GetSelectedTranscriptionMode() == TranscriptionMode.QwenSdkHighAccuracy ? "正在云端识别" : "正在本地识别")
-                : $"已识别 {FormatElapsed(elapsed.Value)}";
-        }
-        else if (progress.Elapsed is TimeSpan operationElapsed)
-        {
-            ElapsedText.Text = $"用时 {FormatElapsed(operationElapsed)}";
-        }
-        else if (progress.State != JobState.Completed)
-        {
-            ElapsedText.Text = string.Empty;
+            _lastDisplayedPercentage = 100;
+            OverallProgressBar.Value = 100;
+            ProgressPercentText.Text = "100%";
         }
 
-        AppendLog($"[{progress.State}] {progress.Message}");
+        _estimatedCompletionAt = progress.EstimatedRemaining is TimeSpan remaining
+            ? DateTimeOffset.Now + remaining
+            : null;
+        UpdateElapsedAndEtaDisplay();
+        AppendProgressLog(progress);
     }
 
     private void ShowResult(PipelineResult result)
     {
-        _lastTxtPath = result.TxtPath;
         _lastOutputDirectory = result.OutputDirectory;
+        var primaryOutput = SelectPrimaryOutput(result);
+        _lastPrimaryOutputPath = primaryOutput?.Path;
+        OpenResultButton.IsEnabled = primaryOutput is not null;
+        OpenResultButton.Content = primaryOutput is null
+            ? "打开结果"
+            : $"打开 {GetOutputFormatDisplayName(primaryOutput.Value.Format)}";
 
         var speakers = result.Document.Segments
             .Where(segment => segment.SpeakerId > 0)
@@ -664,13 +681,14 @@ public partial class MainWindow : Window
             .Distinct()
             .Count();
         var partialLabel = result.Document.IsPartial ? " · 注意：结果不完整" : string.Empty;
-        ResultSummaryText.Text = $"{result.Document.Segments.Count:N0} 个时间段 · {speakers:N0} 位说话人 · {FormatDuration(result.Document.MediaDuration)}{partialLabel}";
+        var formatCount = Math.Max(1, result.OutputPaths.Count);
+        ResultSummaryText.Text = $"{result.Document.Segments.Count:N0} 个时间段 · {speakers:N0} 位说话人 · {formatCount} 种格式 · {FormatDuration(result.Document.MediaDuration)}{partialLabel}";
 
         var preview = TranscriptFormatter.ToTxt(result.Document, options: result.FormattingOptions);
         const int previewLimit = 200_000;
         PreviewTextBox.Text = preview.Length <= previewLimit
             ? preview
-            : preview[..previewLimit] + Environment.NewLine + Environment.NewLine + "—— 预览到此为止；完整内容请打开 TXT 文件 ——";
+            : preview[..previewLimit] + Environment.NewLine + Environment.NewLine + "—— 预览到此为止；完整内容请打开导出文件 ——";
         PreviewTextBox.ScrollToHome();
         ResultCard.Visibility = Visibility.Visible;
     }
@@ -682,9 +700,11 @@ public partial class MainWindow : Window
         StatusDetailText.Text = "原视频没有被修改。下次可以重新开始。";
         FooterStatusText.Text = "已取消";
         OverallProgressBar.IsIndeterminate = false;
-        OverallProgressBar.Value = 0;
-        ProgressPercentText.Text = string.Empty;
-        ElapsedText.Text = string.Empty;
+        OverallProgressBar.Value = _lastDisplayedPercentage;
+        ProgressPercentText.Text = $"{_lastDisplayedPercentage}%";
+        _estimatedCompletionAt = null;
+        ElapsedText.Text = $"已用时 {FormatElapsed(_taskStopwatch?.Elapsed ?? TimeSpan.Zero)} · 已取消";
+        LogProgressSummaryText.Text = $"{_lastDisplayedPercentage}% · 已取消";
         StatusBadgeText.Text = "已取消";
         StatusBadgeBorder.Background = IdleBackground;
         StatusBadgeText.Foreground = IdleForeground;
@@ -698,8 +718,11 @@ public partial class MainWindow : Window
         StatusDetailText.Text = GetFriendlyError(exception);
         FooterStatusText.Text = "失败 · 展开运行记录可查看详情";
         OverallProgressBar.IsIndeterminate = false;
-        ProgressPercentText.Text = string.Empty;
-        ElapsedText.Text = string.Empty;
+        OverallProgressBar.Value = _lastDisplayedPercentage;
+        ProgressPercentText.Text = $"{_lastDisplayedPercentage}%";
+        _estimatedCompletionAt = null;
+        ElapsedText.Text = $"已用时 {FormatElapsed(_taskStopwatch?.Elapsed ?? TimeSpan.Zero)} · 已停止";
+        LogProgressSummaryText.Text = $"{_lastDisplayedPercentage}% · 失败";
         StatusBadgeText.Text = "需要处理";
         StatusBadgeBorder.Background = DangerBackground;
         StatusBadgeText.Foreground = DangerForeground;
@@ -752,16 +775,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ApplyStageVisuals(JobState state)
+    private void ApplyStageVisuals(PipelinePhase phase, JobState state)
     {
-        var currentStage = state switch
+        var currentStage = phase switch
         {
-            JobState.WaitingForModel or JobState.DownloadingModel or JobState.VerifyingModel => 0,
-            JobState.ProbingMedia or JobState.ExtractingAudio => 1,
-            JobState.ReadyToTranscribe or JobState.Transcribing => 2,
-            JobState.ValidatingResult or JobState.Exporting => 3,
-            JobState.Completed => 4,
-            _ => -1
+            PipelinePhase.ProbeMedia or PipelinePhase.PrepareModel => 0,
+            PipelinePhase.ExtractAudio => 1,
+            PipelinePhase.MossDiarization or PipelinePhase.QwenRecognition => 2,
+            PipelinePhase.Validate or PipelinePhase.Export => 3,
+            PipelinePhase.Completed => 4,
+            _ => state switch
+            {
+                JobState.ProbingMedia or JobState.WaitingForModel or JobState.DownloadingModel or JobState.VerifyingModel => 0,
+                JobState.ExtractingAudio => 1,
+                JobState.ReadyToTranscribe or JobState.Transcribing => 2,
+                JobState.ValidatingResult or JobState.Exporting => 3,
+                JobState.Completed => 4,
+                _ => -1,
+            },
         };
 
         SetStageVisual(StageModelBorder, StageModelText, 0, currentStage);
@@ -814,8 +845,11 @@ public partial class MainWindow : Window
         StatusBadgeText.Foreground = IdleForeground;
         OverallProgressBar.IsIndeterminate = false;
         OverallProgressBar.Value = 0;
-        ProgressPercentText.Text = string.Empty;
-        ElapsedText.Text = string.Empty;
+        ProgressPercentText.Text = "0%";
+        ElapsedText.Text = "等待开始";
+        LogProgressSummaryText.Text = "0% · 等待开始";
+        _lastDisplayedPercentage = 0;
+        _estimatedCompletionAt = null;
         FooterStatusText.Text = "就绪";
         ResetStageVisuals();
     }
@@ -827,10 +861,91 @@ public partial class MainWindow : Window
             return;
         }
 
+        var wasAtEnd = LogTextBox.VerticalOffset >= LogTextBox.ExtentHeight - LogTextBox.ViewportHeight - 2;
         var line = $"{DateTime.Now:HH:mm:ss}  {RedactSensitiveText(message.Trim())}";
         LogTextBox.AppendText(line + Environment.NewLine);
-        LogTextBox.ScrollToEnd();
+        if (LogTextBox.Text.Length > MaximumVisibleLogCharacters)
+        {
+            var targetRemoval = LogTextBox.Text.Length - (MaximumVisibleLogCharacters * 4 / 5);
+            var lineBreak = LogTextBox.Text.IndexOf('\n', targetRemoval);
+            if (lineBreak >= 0)
+            {
+                LogTextBox.Text = "……较早的界面日志已省略，完整诊断仍保存在任务目录……" +
+                    Environment.NewLine +
+                    LogTextBox.Text[(lineBreak + 1)..];
+                LogTextBox.CaretIndex = LogTextBox.Text.Length;
+            }
+        }
+
+        if (wasAtEnd)
+        {
+            LogTextBox.ScrollToEnd();
+        }
     }
+
+    private void AppendProgressLog(OperationProgress progress)
+    {
+        var percentage = _lastDisplayedPercentage;
+        if (_lastLoggedProgressPercentage == percentage &&
+            _lastLoggedProgressState == progress.State &&
+            string.Equals(_lastLoggedProgressMessage, progress.Message, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastLoggedProgressPercentage = percentage;
+        _lastLoggedProgressState = progress.State;
+        _lastLoggedProgressMessage = progress.Message;
+        var etaText = progress.State == JobState.Completed
+            ? "已完成"
+            : progress.EstimatedRemaining is TimeSpan remaining
+                ? $"ETA 约 {FormatElapsed(remaining)}"
+                : "ETA 估算中";
+        AppendLog($"[{percentage}% | {etaText}] [{GetPhaseDisplayName(progress.Phase)}] {progress.Message}");
+    }
+
+    private void AppendDiagnosticLog(string message)
+    {
+        var etaText = _estimatedCompletionAt is DateTimeOffset completion
+            ? $"ETA 约 {FormatElapsed(Maximum(completion - DateTimeOffset.Now, TimeSpan.FromSeconds(1)))}"
+            : "ETA 估算中";
+        AppendLog($"[{_lastDisplayedPercentage}% | {etaText}] [诊断] {message}");
+    }
+
+    private void UpdateElapsedAndEtaDisplay()
+    {
+        var elapsed = _taskStopwatch?.Elapsed ?? TimeSpan.Zero;
+        string etaText;
+        if (_currentState == JobState.Completed)
+        {
+            etaText = "已完成";
+        }
+        else if (_estimatedCompletionAt is DateTimeOffset completion)
+        {
+            var remaining = completion - DateTimeOffset.Now;
+            etaText = $"预计剩余约 {FormatElapsed(remaining > TimeSpan.Zero ? remaining : TimeSpan.FromSeconds(1))}";
+        }
+        else
+        {
+            etaText = "正在估算剩余时间";
+        }
+
+        ElapsedText.Text = $"已用时 {FormatElapsed(elapsed)} · {etaText}";
+        LogProgressSummaryText.Text = $"{_lastDisplayedPercentage}% · {etaText}";
+    }
+
+    private static string GetPhaseDisplayName(PipelinePhase phase) => phase switch
+    {
+        PipelinePhase.ProbeMedia => "媒体检查",
+        PipelinePhase.PrepareModel => "模型准备",
+        PipelinePhase.ExtractAudio => "音频提取",
+        PipelinePhase.MossDiarization => "MOSS 识别/分人",
+        PipelinePhase.QwenRecognition => "Qwen 高精度",
+        PipelinePhase.Validate => "结果检查",
+        PipelinePhase.Export => "文件导出",
+        PipelinePhase.Completed => "完成",
+        _ => "准备",
+    };
 
     private static bool TryGetDroppedFile(IDataObject data, out string path)
     {
@@ -846,22 +961,62 @@ public partial class MainWindow : Window
 
     private IReadOnlyList<string> GetSelectedLanguageCodes()
     {
-        var languageCodes = new List<string>(2);
-        if (ChineseLanguageCheckBox.IsChecked == true)
-        {
-            languageCodes.Add("zh");
-        }
-
-        if (EnglishLanguageCheckBox.IsChecked == true)
-        {
-            languageCodes.Add("en");
-        }
-
-        return languageCodes;
+        return GetLanguageOptions()
+            .Where(option => option.CheckBox.IsChecked == true)
+            .Select(option => option.Code)
+            .ToArray();
     }
 
     private bool HasSelectedLanguage() =>
-        ChineseLanguageCheckBox.IsChecked == true || EnglishLanguageCheckBox.IsChecked == true;
+        GetLanguageOptions().Any(option => option.CheckBox.IsChecked == true);
+
+    private TranscriptOutputFormat GetSelectedOutputFormats()
+    {
+        var formats = TranscriptOutputFormat.None;
+        if (TxtOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Txt;
+        }
+        if (MarkdownOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Markdown;
+        }
+        if (DocxOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Docx;
+        }
+        if (PdfOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Pdf;
+        }
+        if (SrtOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Srt;
+        }
+        if (JsonOutputCheckBox.IsChecked == true)
+        {
+            formats |= TranscriptOutputFormat.Json;
+        }
+
+        return formats;
+    }
+
+    private bool HasSelectedOutputFormat() => GetSelectedOutputFormats() != TranscriptOutputFormat.None;
+
+    private IEnumerable<(CheckBox CheckBox, string Code)> GetLanguageOptions()
+    {
+        yield return (ChineseLanguageCheckBox, "zh");
+        yield return (EnglishLanguageCheckBox, "en");
+        yield return (CantoneseLanguageCheckBox, "yue");
+        yield return (JapaneseLanguageCheckBox, "ja");
+        yield return (KoreanLanguageCheckBox, "ko");
+        yield return (FrenchLanguageCheckBox, "fr");
+        yield return (GermanLanguageCheckBox, "de");
+        yield return (SpanishLanguageCheckBox, "es");
+        yield return (PortugueseLanguageCheckBox, "pt");
+        yield return (RussianLanguageCheckBox, "ru");
+        yield return (ItalianLanguageCheckBox, "it");
+    }
 
     private TranscriptionMode GetSelectedTranscriptionMode()
     {
@@ -942,19 +1097,77 @@ public partial class MainWindow : Window
     }
 
     private static string FormatSelectedLanguages(IReadOnlyList<string> languageCodes) =>
-        string.Join(" + ", languageCodes.Select(code => code == "zh" ? "中文" : "English"));
+        string.Join(" + ", languageCodes.Select(code => code switch
+        {
+            "zh" => "中文",
+            "en" => "English",
+            "yue" => "粤语",
+            "ja" => "日本語",
+            "ko" => "한국어",
+            "fr" => "Français",
+            "de" => "Deutsch",
+            "es" => "Español",
+            "pt" => "Português",
+            "ru" => "Русский",
+            "it" => "Italiano",
+            _ => code,
+        }));
+
+    private static string FormatOutputFormats(TranscriptOutputFormat formats) =>
+        string.Join(" / ", new[]
+        {
+            TranscriptOutputFormat.Txt,
+            TranscriptOutputFormat.Markdown,
+            TranscriptOutputFormat.Docx,
+            TranscriptOutputFormat.Pdf,
+            TranscriptOutputFormat.Srt,
+            TranscriptOutputFormat.Json,
+        }.Where(format => formats.HasFlag(format)).Select(GetOutputFormatDisplayName));
+
+    private static string GetOutputFormatDisplayName(TranscriptOutputFormat format) => format switch
+    {
+        TranscriptOutputFormat.Txt => "TXT",
+        TranscriptOutputFormat.Markdown => "Markdown",
+        TranscriptOutputFormat.Docx => "Word",
+        TranscriptOutputFormat.Pdf => "PDF",
+        TranscriptOutputFormat.Srt => "SRT",
+        TranscriptOutputFormat.Json => "JSON",
+        _ => format.ToString(),
+    };
+
+    private static (TranscriptOutputFormat Format, string Path)? SelectPrimaryOutput(PipelineResult result)
+    {
+        TranscriptOutputFormat[] preferredOrder =
+        [
+            TranscriptOutputFormat.Docx,
+            TranscriptOutputFormat.Pdf,
+            TranscriptOutputFormat.Markdown,
+            TranscriptOutputFormat.Txt,
+            TranscriptOutputFormat.Srt,
+            TranscriptOutputFormat.Json,
+        ];
+        foreach (var format in preferredOrder)
+        {
+            if (result.OutputPaths.TryGetValue(format, out var path) && !string.IsNullOrWhiteSpace(path))
+            {
+                return (format, path);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.TxtPath))
+        {
+            return (TranscriptOutputFormat.Txt, result.TxtPath);
+        }
+        if (!string.IsNullOrWhiteSpace(result.SrtPath))
+        {
+            return (TranscriptOutputFormat.Srt, result.SrtPath);
+        }
+        return !string.IsNullOrWhiteSpace(result.JsonPath)
+            ? (TranscriptOutputFormat.Json, result.JsonPath)
+            : null;
+    }
 
     private static string FormatSwitch(bool enabled) => enabled ? "开" : "关";
-
-    private static bool IsIndeterminateState(JobState state) => state is
-        JobState.WaitingForModel or
-        JobState.VerifyingModel or
-        JobState.ProbingMedia or
-        JobState.ReadyToTranscribe or
-        JobState.Transcribing or
-        JobState.ValidatingResult or
-        JobState.Exporting or
-        JobState.Cancelling;
 
     private static string GetStateTitle(JobState state) => state switch
     {
@@ -966,7 +1179,7 @@ public partial class MainWindow : Window
         JobState.ReadyToTranscribe => "准备开始识别",
         JobState.Transcribing => "识别语音并区分说话人",
         JobState.ValidatingResult => "检查转写结果",
-        JobState.Exporting => "生成 TXT、SRT 和 JSON",
+        JobState.Exporting => "生成所选输出文件",
         JobState.Completed => "转写完成",
         JobState.Cancelling => "正在取消",
         JobState.Cancelled => "任务已取消",
@@ -1033,6 +1246,8 @@ public partial class MainWindow : Window
             ? $"{totalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}"
             : $"{elapsed.Minutes:00}:{elapsed.Seconds:00}";
     }
+
+    private static TimeSpan Maximum(TimeSpan left, TimeSpan right) => left > right ? left : right;
 
     private static string FormatDuration(TimeSpan duration)
     {

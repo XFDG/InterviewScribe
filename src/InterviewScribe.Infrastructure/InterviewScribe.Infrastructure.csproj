@@ -9,6 +9,9 @@
     <ProjectReference Include="../InterviewScribe.Core/InterviewScribe.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="PDFsharp-GDI" Version="6.2.4" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="InterviewScribe.Tests" />
   </ItemGroup>
 </Project>

@@ -10,10 +10,19 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
+    <ApplicationIcon>..\..\assets\InterviewScribe.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../InterviewScribe.Core/InterviewScribe.Core.csproj" />
     <ProjectReference Include="../InterviewScribe.Infrastructure/InterviewScribe.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\assets\InterviewScribe.ico" Link="Assets\InterviewScribe.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Resource Include="..\..\assets\interviewscribe-icon.png" Link="Assets\interviewscribe-icon.png" />
   </ItemGroup>
 </Project>

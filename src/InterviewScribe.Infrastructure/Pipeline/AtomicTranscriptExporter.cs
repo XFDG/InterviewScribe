@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Text;
 using InterviewScribe.Core.Domain;
 using InterviewScribe.Core.Export;
@@ -6,35 +7,71 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 
 internal static class AtomicTranscriptExporter
 {
+    private static readonly (TranscriptOutputFormat Format, string Extension)[] SupportedFormats =
+    [
+        (TranscriptOutputFormat.Txt, ".txt"),
+        (TranscriptOutputFormat.Markdown, ".md"),
+        (TranscriptOutputFormat.Docx, ".docx"),
+        (TranscriptOutputFormat.Pdf, ".pdf"),
+        (TranscriptOutputFormat.Srt, ".srt"),
+        (TranscriptOutputFormat.Json, ".json"),
+    ];
+
     public static async Task<(string TxtPath, string SrtPath, string JsonPath)> ExportAsync(
         TranscriptDocument document,
         string outputDirectory,
         CancellationToken cancellationToken,
         TranscriptFormattingOptions? formattingOptions = null)
     {
+        var result = await ExportAsync(
+            document,
+            outputDirectory,
+            TranscriptOutputFormat.Default,
+            cancellationToken,
+            formattingOptions).ConfigureAwait(false);
+        return (
+            result.GetRequiredPath(TranscriptOutputFormat.Txt),
+            result.GetRequiredPath(TranscriptOutputFormat.Srt),
+            result.GetRequiredPath(TranscriptOutputFormat.Json));
+    }
+
+    public static async Task<TranscriptExportResult> ExportAsync(
+        TranscriptDocument document,
+        string outputDirectory,
+        TranscriptOutputFormat formats,
+        CancellationToken cancellationToken,
+        TranscriptFormattingOptions? formattingOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ValidateFormats(formats);
         formattingOptions ??= TranscriptFormattingOptions.Default;
         Directory.CreateDirectory(outputDirectory);
         VerifyWritable(outputDirectory);
 
         var safeBaseName = MakeSafeFileName(Path.GetFileNameWithoutExtension(document.SourceFileName));
         var stem = GetAvailableStem(outputDirectory, $"{safeBaseName}_转写");
-        var txtPath = Path.Combine(outputDirectory, stem + ".txt");
-        var srtPath = Path.Combine(outputDirectory, stem + ".srt");
-        var jsonPath = Path.Combine(outputDirectory, stem + ".json");
+        var finalPaths = SupportedFormats
+            .Where(item => formats.HasFlag(item.Format))
+            .ToDictionary(item => item.Format, item => Path.Combine(outputDirectory, stem + item.Extension));
 
         var pending = new List<(string Temporary, string Final)>();
         var committed = new List<string>();
         try
         {
-            pending.Add(await WriteTemporaryAsync(
-                txtPath,
-                TranscriptFormatter.ToTxt(document, options: formattingOptions),
-                cancellationToken).ConfigureAwait(false));
-            pending.Add(await WriteTemporaryAsync(
-                srtPath,
-                TranscriptFormatter.ToSrt(document, options: formattingOptions),
-                cancellationToken).ConfigureAwait(false));
-            pending.Add(await WriteTemporaryAsync(jsonPath, TranscriptFormatter.ToJson(document) + Environment.NewLine, cancellationToken).ConfigureAwait(false));
+            foreach (var (format, _) in SupportedFormats.Where(item => formats.HasFlag(item.Format)))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var finalPath = finalPaths[format];
+                var temporaryPath = CreateTemporaryPath(finalPath);
+                pending.Add((temporaryPath, finalPath));
+                await WriteTemporaryAsync(
+                    format,
+                    temporaryPath,
+                    document,
+                    formattingOptions,
+                    cancellationToken).ConfigureAwait(false);
+            }
 
             cancellationToken.ThrowIfCancellationRequested();
             foreach (var item in pending)
@@ -43,7 +80,11 @@ internal static class AtomicTranscriptExporter
                 committed.Add(item.Final);
             }
 
-            return (txtPath, srtPath, jsonPath);
+            return new TranscriptExportResult
+            {
+                Stem = stem,
+                Paths = new ReadOnlyDictionary<TranscriptOutputFormat, string>(finalPaths),
+            };
         }
         catch
         {
@@ -52,7 +93,7 @@ internal static class AtomicTranscriptExporter
                 TryDelete(item.Temporary);
             }
 
-            // Only roll back files created by this export.  If another process won
+            // Only roll back files created by this export. If another process won
             // the race for one of the names, its pre-existing file must be kept.
             foreach (var path in committed)
             {
@@ -63,14 +104,67 @@ internal static class AtomicTranscriptExporter
         }
     }
 
-    private static async Task<(string Temporary, string Final)> WriteTemporaryAsync(
-        string finalPath,
-        string content,
+    private static async Task WriteTemporaryAsync(
+        TranscriptOutputFormat format,
+        string temporaryPath,
+        TranscriptDocument document,
+        TranscriptFormattingOptions formattingOptions,
         CancellationToken cancellationToken)
     {
-        var temporaryPath = finalPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        await File.WriteAllTextAsync(temporaryPath, content, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-        return (temporaryPath, finalPath);
+        switch (format)
+        {
+            case TranscriptOutputFormat.Txt:
+                await WriteTextAsync(
+                    temporaryPath,
+                    TranscriptFormatter.ToTxt(document, options: formattingOptions),
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            case TranscriptOutputFormat.Markdown:
+                await WriteTextAsync(
+                    temporaryPath,
+                    TranscriptFormatter.ToMarkdown(document, options: formattingOptions),
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            case TranscriptOutputFormat.Docx:
+                await WordTranscriptWriter.WriteAsync(temporaryPath, document, formattingOptions, cancellationToken).ConfigureAwait(false);
+                break;
+            case TranscriptOutputFormat.Pdf:
+                await PdfTranscriptWriter.WriteAsync(temporaryPath, document, formattingOptions, cancellationToken).ConfigureAwait(false);
+                break;
+            case TranscriptOutputFormat.Srt:
+                await WriteTextAsync(
+                    temporaryPath,
+                    TranscriptFormatter.ToSrt(document, options: formattingOptions),
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            case TranscriptOutputFormat.Json:
+                await WriteTextAsync(
+                    temporaryPath,
+                    TranscriptFormatter.ToJson(document) + Environment.NewLine,
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(format), format, "不支持的导出格式。");
+        }
+    }
+
+    private static async Task WriteTextAsync(string path, string content, CancellationToken cancellationToken) =>
+        await File.WriteAllTextAsync(path, content, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+
+    private static string CreateTemporaryPath(string finalPath) =>
+        finalPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
+    private static void ValidateFormats(TranscriptOutputFormat formats)
+    {
+        if (formats == TranscriptOutputFormat.None)
+        {
+            throw new ArgumentException("请至少选择一种输出格式。", nameof(formats));
+        }
+
+        if ((formats & ~TranscriptOutputFormat.All) != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(formats), formats, "包含不支持的输出格式。");
+        }
     }
 
     private static void VerifyWritable(string outputDirectory)
@@ -108,9 +202,7 @@ internal static class AtomicTranscriptExporter
     }
 
     private static bool HasAnyOutput(string directory, string stem) =>
-        File.Exists(Path.Combine(directory, stem + ".txt")) ||
-        File.Exists(Path.Combine(directory, stem + ".srt")) ||
-        File.Exists(Path.Combine(directory, stem + ".json"));
+        SupportedFormats.Any(item => File.Exists(Path.Combine(directory, stem + item.Extension)));
 
     private static string MakeSafeFileName(string value)
     {

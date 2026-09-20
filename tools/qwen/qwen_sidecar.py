@@ -576,7 +576,13 @@ def _run_local(args: argparse.Namespace, audio: Path, info: WavInfo) -> dict[str
         raise UserFacingError(f"Qwen 本地运行时不完整：{exc}") from exc
 
     device, dtype = _select_device(torch, args.device)
-    _progress(f"本地运行设备：{device}（{str(dtype).replace('torch.', '')}）", 0.03)
+    device_label = device.upper()
+    if device == "cuda":
+        try:
+            device_label = f"CUDA · {torch.cuda.get_device_name(0)}"
+        except (RuntimeError, AssertionError, AttributeError):
+            device_label = "CUDA GPU"
+    _progress(f"本地运行设备：{device_label}（{str(dtype).replace('torch.', '')}）", 0.03)
     with _temporary_audio_directory(args.output, "local") as temporary:
         chunks = _prepare_local_chunks(audio, info, Path(temporary), args.chunk_seconds)
         _progress(f"音频已分为 {len(chunks)} 段", 0.06)
@@ -1242,7 +1248,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", required=True, choices=("local", "sdk"))
     parser.add_argument("--audio", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--language", required=True, choices=("auto", "zh", "en"))
+    parser.add_argument(
+        "--language",
+        required=True,
+        choices=("auto", "zh", "en", "yue", "ja", "ko", "fr", "de", "es", "pt", "ru", "it"),
+    )
     parser.add_argument("--context", default="")
 
     parser.add_argument("--model-dir")

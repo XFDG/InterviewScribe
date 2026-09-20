@@ -132,6 +132,44 @@ public sealed class TranscriptFormatterTests
         Assert.False(root.TryGetProperty("SourceFileName", out _));
     }
 
+    [Fact]
+    public void ToMarkdown_PreservesBilingualTextTimelineAndSpeakers()
+    {
+        var document = TestDocumentFactory.Create(
+            sourceFileName: "技术_[面试].mp4",
+            warnings: ["请 *复核* 专有名词"]);
+        var speakerNames = new Dictionary<int, string>
+        {
+            [1] = "Candidate_A",
+            [2] = "面试官",
+        };
+
+        var markdown = TranscriptFormatter.ToMarkdown(document, speakerNames);
+
+        Assert.StartsWith("# 面试录屏转写", markdown);
+        Assert.Contains("技术\\_\\[面试\\].mp4", markdown);
+        Assert.Contains("- 请 \\*复核\\* 专有名词", markdown);
+        Assert.Contains("### [00:00:00.000 - 00:00:02.000] Candidate\\_A", markdown);
+        Assert.Contains("Hello world", markdown);
+        Assert.Contains("你好世界", markdown);
+    }
+
+    [Fact]
+    public void ToMarkdown_WhenLabelsAreDisabled_ProducesPlainTranscriptParagraphs()
+    {
+        var markdown = TranscriptFormatter.ToMarkdown(
+            TestDocumentFactory.Create(),
+            options: new TranscriptFormattingOptions
+            {
+                IncludeTimestamps = false,
+                IncludeSpeakers = false,
+            });
+
+        Assert.DoesNotContain("### [00:", markdown);
+        Assert.DoesNotContain("说话人 1", markdown);
+        Assert.Contains($"Hello world{Environment.NewLine}{Environment.NewLine}你好世界", markdown);
+    }
+
     [Theory]
     [InlineData(-1L, true, "00:00:00.000")]
     [InlineData(3_723_004L, true, "01:02:03.004")]
@@ -146,5 +184,6 @@ public sealed class TranscriptFormatterTests
     {
         Assert.Throws<ArgumentNullException>(() => TranscriptFormatter.ToTxt(null!));
         Assert.Throws<ArgumentNullException>(() => TranscriptFormatter.ToSrt(null!));
+        Assert.Throws<ArgumentNullException>(() => TranscriptFormatter.ToMarkdown(null!));
     }
 }
