@@ -18,8 +18,13 @@ public sealed class AppPaths
     public string RuntimeRoot => Path.Combine(LocalRoot, "runtime");
     public string QwenRuntimeRoot => Path.Combine(LocalRoot, "qwen-runtime");
     public string QwenVirtualEnvironmentRoot => Path.Combine(QwenRuntimeRoot, ".venv");
-    public string QwenAsrModelRoot => Path.Combine(ModelsRoot, "Qwen3-ASR-1.7B-hf");
-    public string QwenAlignerModelRoot => Path.Combine(ModelsRoot, "Qwen3-ForcedAligner-0.6B-hf");
+    // Qwen officially recommends ModelScope for downloads in Mainland China.
+    // Keeping its snapshots separate from the MOSS GGUF store also lets the
+    // installer adopt a manually completed official ModelScope download without
+    // copying several additional gigabytes.
+    public string QwenModelScopeRoot => Path.Combine(LocalRoot, "ModelScope-Qwen3");
+    public string QwenAsrModelRoot => Path.Combine(QwenModelScopeRoot, "Qwen3-ASR-1.7B");
+    public string QwenAlignerModelRoot => Path.Combine(QwenModelScopeRoot, "Qwen3-ForcedAligner-0.6B");
     public string SettingsPath => Path.Combine(LocalRoot, "settings.json");
 
     public void EnsureCreated()

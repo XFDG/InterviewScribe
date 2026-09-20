@@ -1,31 +1,21 @@
 #!/usr/bin/env python3
-"""InterviewScribe Qwen transcription sidecar.
-
-The local backend is deliberately offline-only.  The SDK backend is deliberately
-online-only and uploads short, VAD-aligned audio chunks to DashScope.
-"""
+"""InterviewScribe local, offline Qwen transcription sidecar."""
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import gc
 import json
 import math
 import os
-import random
 import re
 import sys
 import tempfile
-import threading
-import time
+import unicodedata
 import wave
 from array import array
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from importlib import metadata
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -33,13 +23,11 @@ from typing import Any, Iterable, Sequence
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
-ASR_REPOSITORY = "Qwen/Qwen3-ASR-1.7B-hf"
-ASR_REVISION = "bcd2b5b7f32b480ab5790554cfa8347f246a14f3"
-ALIGNER_REPOSITORY = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
-ALIGNER_REVISION = "c07281df297b9905d24a508279258cccf987a064"
+ASR_REPOSITORY = "Qwen/Qwen3-ASR-1.7B"
+ASR_REVISION = "d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec"
+ALIGNER_REPOSITORY = "Qwen/Qwen3-ForcedAligner-0.6B"
+ALIGNER_REVISION = "6f4d7c9606feb7adf282c9e4b139f28e8695d867"
 REVISION_MARKER = ".interviewscribe-revision"
-_DASHSCOPE_REQUEST_TIMEOUT_SECONDS = 120
-_MAX_DASHSCOPE_RETRY_DELAY_SECONDS = 60.0
 
 _LANGUAGE_NAMES = {
     "ar": "Arabic",
@@ -56,35 +44,26 @@ _LANGUAGE_NAMES = {
     "yue": "Cantonese",
 }
 
+# Qwen3-ASR recognizes 30 languages, whereas Qwen3-ForcedAligner-0.6B only
+# supports these 11.  Do not force an unsupported auto-detected language into
+# Chinese merely to fabricate a fine-grained timeline.
+_ALIGNER_LANGUAGE_NAMES = {
+    "zh": "Chinese",
+    "en": "English",
+    "yue": "Cantonese",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "es": "Spanish",
+}
+
 
 class UserFacingError(RuntimeError):
     """An expected failure whose message is safe to show in the GUI."""
-
-
-class DashScopeResponseError(UserFacingError):
-    """A non-success DashScope response with machine-readable retry metadata."""
-
-    def __init__(
-        self,
-        status: int | None,
-        code: str,
-        message: str,
-        retry_after_seconds: float | None,
-    ) -> None:
-        self.status = status
-        self.code = code
-        self.retry_after_seconds = retry_after_seconds
-        status_label = str(status) if status is not None else "unknown"
-        detail = " ".join(part for part in (code, message) if part).strip()
-        safe_detail = _sanitize_error(detail) if detail else ""
-        super().__init__(
-            f"DashScope 返回 HTTP {status_label}"
-            f"{': ' + safe_detail if safe_detail else ''}"
-        )
-
-
-class DashScopePeerStoppedError(UserFacingError):
-    """A cooperative cancellation caused by another worker's real failure."""
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -121,24 +100,6 @@ class TranscriptChunk:
     language: str
 
 
-@dataclass(frozen=True)
-class SpeakerTurn:
-    start_frame: int
-    end_frame: int
-    speaker_id: int
-
-
-@dataclass(frozen=True)
-class SdkAudioChunk:
-    start_frame: int
-    end_frame: int
-    samples: Any
-    speaker_id: int = 0
-
-
-_MAXIMUM_TOLERATED_SPEAKER_OVERLAP_FRAMES = round(0.40 * SAMPLE_RATE)
-
-
 def _emit(event_type: str, **values: Any) -> None:
     event = {"type": event_type, **values}
     sys.stderr.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -149,21 +110,9 @@ def _progress(message: str, fraction: float) -> None:
     _emit("progress", message=message, fraction=max(0.0, min(1.0, fraction)))
 
 
-def _package_version(name: str) -> str:
-    try:
-        return metadata.version(name)
-    except metadata.PackageNotFoundError:
-        return "unknown"
-
-
 def _sanitize_error(message: str) -> str:
     result = message.strip() or "未知错误"
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    hf_token = os.environ.get("HF_TOKEN", "")
-    for secret in (api_key, hf_token):
-        if secret:
-            result = result.replace(secret, "***")
-    # Avoid dumping an entire remote response or an enormous native exception.
+    # Avoid dumping an enormous native exception into the GUI diagnostics.
     result = re.sub(r"\s+", " ", result)
     return result[:1500]
 
@@ -345,69 +294,166 @@ def _transcribe_local_chunks(
     max_new_tokens: int,
     torch_module: Any,
 ) -> list[TranscriptChunk]:
-    from transformers import AutoModelForMultimodalLM, AutoProcessor
+    from qwen_asr import Qwen3ASRModel
 
-    processor: Any = None
     model: Any = None
     results: list[TranscriptChunk] = []
     try:
         _progress("正在加载 Qwen3-ASR-1.7B（严格离线）…", 0.08)
-        processor = AutoProcessor.from_pretrained(
-            str(model_dir), local_files_only=True, trust_remote_code=False
+        # Use Qwen's maintained Transformers wrapper rather than the legacy
+        # raw-AutoModel calls.  The model directories are already validated and
+        # are passed as paths, while local_files_only plus offline env flags make
+        # a network fallback impossible at inference time.
+        model = Qwen3ASRModel.from_pretrained(
+            str(model_dir),
+            local_files_only=True,
+            dtype=dtype,
+            device_map="cuda:0" if device == "cuda" else "cpu",
+            max_inference_batch_size=1,
+            max_new_tokens=max_new_tokens,
         )
-        model = AutoModelForMultimodalLM.from_pretrained(
-            str(model_dir), local_files_only=True, trust_remote_code=False, dtype=dtype
-        )
-        model.to(device)
-        model.eval()
 
         for index, chunk in enumerate(chunks):
-            request: dict[str, Any] = {"audio": str(chunk.path)}
-            if language != "auto":
-                request["language"] = language
-            if context:
-                request["prompt"] = context
-            inputs = processor.apply_transcription_request(**request).to(device, dtype)
-            with torch_module.inference_mode():
-                output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
-            prompt_length = inputs["input_ids"].shape[1]
-            generated_ids = output_ids[:, prompt_length:]
-            generated_count = int(generated_ids.shape[1])
-            parsed = processor.decode(generated_ids, return_format="parsed")[0]
-            raw = str(processor.decode(generated_ids)[0])
-            text = str(parsed.get("transcription") or "").strip()
-            detected_language = str(parsed.get("language") or _LANGUAGE_NAMES.get(language, language)).strip()
-            if generated_count >= max_new_tokens:
-                raise UserFacingError(
-                    f"第 {index + 1} 段转录达到 max_new_tokens={max_new_tokens}，"
-                    "为避免生成不完整 TXT，已停止。请减小 --chunk-seconds 或增大 --max-new-tokens。"
+            try:
+                forced_language = None if language == "auto" else _LANGUAGE_NAMES[language]
+                result = model.transcribe(
+                    audio=str(chunk.path),
+                    context=context,
+                    language=forced_language,
+                    return_time_stamps=False,
                 )
+                if len(result) != 1:
+                    raise ValueError(f"Qwen 返回了 {len(result)} 个结果，期望 1 个。")
+                text = str(result[0].text or "").strip()
+                raw = text
+                detected_language = str(
+                    result[0].language or _LANGUAGE_NAMES.get(language, language)
+                ).strip()
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                raise UserFacingError(
+                    f"第 {index + 1}/{len(chunks)} 段 Qwen 转录失败：{_sanitize_error(str(exc))}"
+                ) from exc
             results.append(TranscriptChunk(chunk, text, raw, detected_language))
-            del inputs, output_ids, generated_ids
             fraction = 0.13 + 0.42 * ((index + 1) / len(chunks))
             _progress(f"Qwen 转录 {index + 1}/{len(chunks)}", fraction)
         return results
     finally:
         # This function must return only plain Python data.  Dropping every model
         # reference before loading the aligner is essential on an 8 GB GPU.
-        del model, processor
+        del model
         _release_cuda(torch_module)
 
 
-def _alignment_language(detected: str, requested: str) -> str:
-    normalized = detected.strip().lower()
-    for code, name in _LANGUAGE_NAMES.items():
-        if normalized in {code, name.lower()}:
-            return name
-    if "chinese" in normalized or "mandarin" in normalized:
-        return "Chinese"
-    if "english" in normalized:
-        return "English"
-    return _LANGUAGE_NAMES.get(requested, detected or "Chinese")
+def _alignment_language(detected: str, requested: str) -> str | None:
+    """Return a truthful ForcedAligner language, or None for a coarse fallback.
+
+    Qwen can report a comma-separated language list for code-switching.  A
+    detected unsupported language must *not* be silently aligned as Chinese:
+    doing so would make invented timestamps look authoritative.
+    """
+
+    candidates = [item.strip().lower() for item in re.split(r"[,;/]", detected) if item.strip()]
+    resolved: list[str] = []
+    for candidate in candidates:
+        canonical: str | None = None
+        for code, name in _LANGUAGE_NAMES.items():
+            if candidate in {code, name.lower()}:
+                canonical = name
+                break
+        if canonical is None and ("chinese" in candidate or "mandarin" in candidate):
+            canonical = "Chinese"
+        if canonical is None:
+            # Do not guess whether an unknown label is supported.
+            return None
+        if canonical not in _ALIGNER_LANGUAGE_NAMES.values():
+            return None
+        resolved.append(canonical)
+
+    if resolved:
+        return resolved[0]
+    # All selectable explicit GUI languages are in this allow-list.  This
+    # fallback is only used when auto LID reports an empty label.
+    return _ALIGNER_LANGUAGE_NAMES.get(requested)
+
+
+def _alignment_text_key(value: str) -> str:
+    """Normalize transcript text like the official aligner, retaining offsets."""
+
+    result: list[str] = []
+    for character in unicodedata.normalize("NFKC", value).casefold():
+        if character in {"'", "\u2018", "\u2019"}:
+            result.append("'")
+        elif character.isalnum():
+            result.append(character)
+    return "".join(result)
+
+
+def _project_original_text_onto_alignment(
+    words: Sequence[Any], transcript_text: str
+) -> list[str] | None:
+    """Attach original punctuation/spacing to the following aligned token.
+
+    Qwen3-ForcedAligner deliberately removes punctuation while tokenizing.  The
+    app exports its timeline segments, not only ``fullText``, so using the
+    aligner's tokens directly would silently strip punctuation from TXT/MD/
+    Word/PDF.  This ordered projection retains the ASR text verbatim whenever
+    its normalized aligned tokens can be located safely.
+    """
+
+    if not transcript_text:
+        return None
+
+    source_key_parts: list[str] = []
+    source_offsets: list[int] = []
+    for source_index, character in enumerate(transcript_text):
+        normalized = _alignment_text_key(character)
+        source_key_parts.append(normalized)
+        source_offsets.extend([source_index] * len(normalized))
+    source_key = "".join(source_key_parts)
+    if not source_key:
+        return None
+
+    end_positions: list[int] = []
+    key_cursor = 0
+    for word in words:
+        raw_token = word.get("text") if isinstance(word, dict) else getattr(word, "text", None)
+        token_key = _alignment_text_key(str(raw_token or ""))
+        if not token_key:
+            return None
+        # The aligner must account for the next normalized source token exactly.
+        # Searching ahead would make a dropped word inherit the following word's
+        # timestamp, which is worse than returning the existing coarse fallback.
+        match_index = source_key.find(token_key, key_cursor)
+        if match_index != key_cursor:
+            return None
+        end_positions.append(source_offsets[match_index + len(token_key) - 1] + 1)
+        key_cursor = match_index + len(token_key)
+
+    if not end_positions:
+        return None
+
+    display_texts: list[str] = []
+    for index, end in enumerate(end_positions):
+        # Prefix punctuation/whitespace belongs to the token on its right.  The
+        # C# reading merger trims individual tokens, so this preserves `Hello,
+        # world!` rather than turning it into `Hello,world!`.
+        segment_start = 0 if index == 0 else end_positions[index - 1]
+        if end <= segment_start:
+            return None
+        display_texts.append(transcript_text[segment_start:end])
+    # The last token owns source suffix punctuation/whitespace, which has no
+    # subsequent aligned token to receive it.
+    display_texts[-1] += transcript_text[end_positions[-1] :]
+    return display_texts
 
 
 def _aligned_word_segments(
-    words: Sequence[Any], chunk_start_ms: int, chunk_end_ms: int
+    words: Sequence[Any],
+    chunk_start_ms: int,
+    chunk_end_ms: int,
+    display_texts: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Keep the forced aligner's native word/token granularity.
 
@@ -416,6 +462,10 @@ def _aligned_word_segments(
     be divided at a speaker boundary.  Returning each aligned unit lets it use
     real overlap and coalesce only after speaker assignment.
     """
+
+    words = list(words)
+    if display_texts is not None and len(display_texts) != len(words):
+        raise UserFacingError("对齐文本投影数量与时间轴 token 数量不一致。")
 
     segments: list[dict[str, Any]] = []
     if chunk_end_ms <= chunk_start_ms:
@@ -432,9 +482,12 @@ def _aligned_word_segments(
             start_value = getattr(word, "start_time", None)
             end_value = getattr(word, "end_time", None)
 
-        token = str(token_value or "").strip()
-        if not token:
+        aligned_token = str(token_value or "").strip()
+        if not aligned_token:
             raise UserFacingError(f"对齐器第 {index + 1} 个词/token 缺少文本。")
+        token = str(display_texts[index]) if display_texts is not None else aligned_token
+        if not token:
+            raise UserFacingError(f"对齐器第 {index + 1} 个词/token 投影后为空。")
         if isinstance(start_value, bool) or isinstance(end_value, bool):
             raise UserFacingError(f"对齐器第 {index + 1} 个词/token 的时间戳类型无效。")
         try:
@@ -483,47 +536,103 @@ def _align_local_chunks(
     requested_language: str,
     torch_module: Any,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    from transformers import AutoModelForTokenClassification, AutoProcessor
+    from qwen_asr import Qwen3ForcedAligner
 
-    processor: Any = None
     model: Any = None
     segments: list[dict[str, Any]] = []
     warnings: list[str] = []
+    alignment_plan = [
+        (index, item, _alignment_language(item.language, requested_language))
+        for index, item in enumerate(transcripts)
+        if item.text
+    ]
     try:
-        _progress("已释放 ASR；正在加载 Qwen3 Forced Aligner…", 0.61)
-        processor = AutoProcessor.from_pretrained(
-            str(aligner_dir), local_files_only=True, trust_remote_code=False
-        )
-        model = AutoModelForTokenClassification.from_pretrained(
-            str(aligner_dir), local_files_only=True, trust_remote_code=False, dtype=dtype
-        )
-        model.to(device)
-        model.eval()
+        if any(language is not None for _, _, language in alignment_plan):
+            _progress("已释放 ASR；正在加载 Qwen3 Forced Aligner…", 0.61)
+            model = Qwen3ForcedAligner.from_pretrained(
+                str(aligner_dir),
+                local_files_only=True,
+                dtype=dtype,
+                device_map="cuda:0" if device == "cuda" else "cpu",
+            )
 
-        for index, item in enumerate(transcripts):
-            if not item.text:
+        for aligned_index, (index, item, language) in enumerate(alignment_plan):
+            if language is None:
+                # Qwen ASR can recognize more languages than ForcedAligner.
+                # Preserve the original transcript, but label the timestamp as
+                # chunk-level rather than pretending it is word-level.
+                segments.append(
+                    {
+                        "startMs": item.audio.start_ms,
+                        "endMs": item.audio.end_ms,
+                        "speakerId": 0,
+                        "text": item.raw_text or item.text,
+                    }
+                )
+                warnings.append(
+                    f"第 {index + 1}/{len(transcripts)} 段检测为 “{item.language or '未知语言'}”，"
+                    "不在 Qwen3-ForcedAligner 的 11 种支持语言内；已保留原文，"
+                    "该段时间轴为音频分段级而非逐词级。"
+                )
+                fraction = 0.66 + 0.29 * ((aligned_index + 1) / len(alignment_plan))
+                _progress(f"时间轴对齐 {aligned_index + 1}/{len(alignment_plan)}（分段级）", fraction)
                 continue
             try:
-                language = _alignment_language(item.language, requested_language)
-                inputs, word_lists = processor.prepare_forced_aligner_inputs(
-                    audio=str(item.audio.path), transcript=item.text, language=language
+                if model is None:
+                    raise RuntimeError("ForcedAligner 未加载。")
+                results = model.align(
+                    audio=str(item.audio.path),
+                    text=item.text,
+                    language=language,
                 )
-                inputs = inputs.to(device, dtype)
-                with torch_module.inference_mode():
-                    outputs = model(**inputs)
-                timestamps = processor.decode_forced_alignment(
-                    logits=outputs.logits,
-                    input_ids=inputs["input_ids"],
-                    word_lists=word_lists,
-                    timestamp_token_id=model.config.timestamp_token_id,
-                )[0]
+                if len(results) != 1:
+                    raise ValueError(f"对齐器返回了 {len(results)} 个结果，期望 1 个。")
+                timestamps = results[0]
+                # qwen-asr's public API returns a ForcedAlignResult object.
+                # Its word/token sequence lives in `.items`; older test doubles
+                # and earlier wrappers returned the sequence directly.  Accept
+                # both shapes, but never iterate the result object itself (it is
+                # not a Sequence in the official package).
+                if isinstance(timestamps, dict):
+                    aligned_items = timestamps.get("items", timestamps)
+                elif isinstance(timestamps, (list, tuple)):
+                    aligned_items = timestamps
+                else:
+                    aligned_items = getattr(timestamps, "items", timestamps)
+                if callable(aligned_items):
+                    raise ValueError("对齐器结果不包含可迭代的 items。")
+                aligned_items = list(aligned_items)
+                display_texts = _project_original_text_onto_alignment(
+                    aligned_items, item.raw_text or item.text
+                )
+                if display_texts is None:
+                    # Do not let a tokenization difference erase punctuation or
+                    # words from rendered exports.  This explicit coarse fallback
+                    # is safer than claiming per-word timestamps for altered text.
+                    segments.append(
+                        {
+                            "startMs": item.audio.start_ms,
+                            "endMs": item.audio.end_ms,
+                            "speakerId": 0,
+                            "text": item.raw_text or item.text,
+                        }
+                    )
+                    warnings.append(
+                        f"第 {index + 1}/{len(transcripts)} 段的对齐 token 无法与 Qwen 原文安全映射；"
+                        "已保留原始标点文字，该段时间轴为音频分段级而非逐词级。"
+                    )
+                    fraction = 0.66 + 0.29 * ((aligned_index + 1) / len(alignment_plan))
+                    _progress(f"时间轴对齐 {aligned_index + 1}/{len(alignment_plan)}（分段级）", fraction)
+                    continue
                 aligned_words = _aligned_word_segments(
-                    timestamps, item.audio.start_ms, item.audio.end_ms
+                    aligned_items,
+                    item.audio.start_ms,
+                    item.audio.end_ms,
+                    display_texts,
                 )
                 if not aligned_words:
                     raise ValueError("对齐器未返回有效时间戳")
                 segments.extend(aligned_words)
-                del inputs, outputs
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
@@ -536,11 +645,11 @@ def _align_local_chunks(
                     f"（{item.audio.start_ms}–{item.audio.end_ms} ms）：{detail}。"
                     "未生成粗粒度回退时间轴，请检查显存/内存或重新安装对齐模型。"
                 ) from exc
-            fraction = 0.66 + 0.29 * ((index + 1) / len(transcripts))
-            _progress(f"时间轴对齐 {index + 1}/{len(transcripts)}", fraction)
+            fraction = 0.66 + 0.29 * ((aligned_index + 1) / len(alignment_plan))
+            _progress(f"时间轴对齐 {aligned_index + 1}/{len(alignment_plan)}", fraction)
         return segments, warnings
     finally:
-        del model, processor
+        del model
         _release_cuda(torch_module)
 
 
@@ -565,8 +674,8 @@ def _temporary_audio_directory(output_path: str, mode: str) -> tempfile.Temporar
 def _run_local(args: argparse.Namespace, audio: Path, info: WavInfo) -> dict[str, Any]:
     model_dir = Path(args.model_dir).expanduser().resolve()
     aligner_dir = Path(args.aligner_dir).expanduser().resolve()
-    _validate_model_directory(model_dir, ASR_REVISION, "Qwen3-ASR-1.7B-hf")
-    _validate_model_directory(aligner_dir, ALIGNER_REVISION, "Qwen3-ForcedAligner-0.6B-hf")
+    _validate_model_directory(model_dir, ASR_REVISION, "Qwen3-ASR-1.7B")
+    _validate_model_directory(aligner_dir, ALIGNER_REVISION, "Qwen3-ForcedAligner-0.6B")
     _set_strict_offline_environment()
 
     try:
@@ -622,609 +731,6 @@ def _run_local(args: argparse.Namespace, audio: Path, info: WavInfo) -> dict[str
     }
 
 
-def _mapping_get(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, dict):
-        return value.get(key, default)
-    try:
-        return value[key]
-    except (KeyError, TypeError, IndexError):
-        return getattr(value, key, default)
-
-
-def _http_status(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value.strip()):
-        return int(value.strip())
-    return None
-
-
-def _retry_after_seconds(headers: Any, now: datetime | None = None) -> float | None:
-    """Parse the two RFC 9110 Retry-After forms; reject ambiguous values."""
-
-    if headers is None:
-        return None
-    try:
-        items = headers.items()
-    except AttributeError:
-        return None
-    raw: Any = None
-    for key, value in items:
-        if str(key).lower() == "retry-after":
-            raw = value
-            break
-    if raw is None or isinstance(raw, bool):
-        return None
-    value = str(raw).strip()
-    if re.fullmatch(r"[0-9]+", value):
-        return float(int(value))
-    try:
-        retry_at = parsedate_to_datetime(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if retry_at.tzinfo is None:
-        return None
-    reference = now or datetime.now(timezone.utc)
-    if reference.tzinfo is None:
-        reference = reference.replace(tzinfo=timezone.utc)
-    return max(0.0, (retry_at - reference).total_seconds())
-
-
-def _sdk_response(response: Any) -> tuple[str, str]:
-    status = _http_status(_mapping_get(response, "status_code"))
-    if status != 200:
-        raw_code = _mapping_get(response, "code", "")
-        raw_message = _mapping_get(response, "message", "")
-        code = "" if raw_code is None else str(raw_code)
-        message = "" if raw_message is None else str(raw_message)
-        retry_after = _retry_after_seconds(_mapping_get(response, "headers"))
-        raise DashScopeResponseError(status, code, message, retry_after)
-
-    try:
-        output = _mapping_get(response, "output")
-        choice = _mapping_get(output, "choices")[0]
-        message = _mapping_get(choice, "message")
-        content = _mapping_get(message, "content", [])
-        text = str(_mapping_get(content[0], "text", "")) if content else ""
-        annotations = _mapping_get(message, "annotations", []) or []
-        language_code = str(_mapping_get(annotations[0], "language", "")) if annotations else ""
-    except (KeyError, TypeError, IndexError) as exc:
-        raise UserFacingError("DashScope 返回了无法解析的 Qwen ASR 结果。") from exc
-    return _LANGUAGE_NAMES.get(language_code.lower(), language_code or "auto"), text.strip()
-
-
-_RETRYABLE_DASHSCOPE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
-
-
-def _is_retryable_dashscope_response(error: DashScopeResponseError) -> bool:
-    return error.code != "DataInspectionFailed" and error.status in _RETRYABLE_DASHSCOPE_STATUSES
-
-
-def _is_retryable_transport_exception(error: BaseException) -> bool:
-    request_types: tuple[type[BaseException], ...] = ()
-    try:
-        from requests import exceptions as requests_exceptions
-
-        request_types = (
-            requests_exceptions.Timeout,
-            requests_exceptions.ConnectionError,
-            requests_exceptions.ChunkedEncodingError,
-        )
-    except ImportError:
-        # SDK mode normally has requests through dashscope. Built-in network
-        # failures can still be classified safely if that dependency is broken.
-        pass
-    return isinstance(error, (TimeoutError, ConnectionError, *request_types))
-
-
-def _dashscope_retry_delay(attempt: int, error: BaseException) -> float:
-    if isinstance(error, DashScopeResponseError) and error.retry_after_seconds is not None:
-        return min(_MAX_DASHSCOPE_RETRY_DELAY_SECONDS, error.retry_after_seconds)
-    return min(8.0, 0.75 * (2 ** (attempt - 1))) + random.uniform(0.0, 0.25)
-
-
-def _dashscope_failure(error: BaseException) -> UserFacingError:
-    if isinstance(error, DashScopeResponseError):
-        detail = _sanitize_error(str(error))
-    else:
-        detail = _sanitize_error(f"{type(error).__name__}: {error}")
-    return UserFacingError(f"DashScope Qwen ASR 请求失败：{detail}")
-
-
-def _call_dashscope_chunk(
-    path: Path,
-    model_name: str,
-    context: str,
-    attempts: int,
-    post_process: Any,
-    stop_event: threading.Event | None = None,
-) -> tuple[str, str]:
-    import dashscope
-
-    messages = [
-        {"role": "system", "content": [{"text": context}]},
-        {"role": "user", "content": [{"audio": path.resolve().as_uri()}]},
-    ]
-    for attempt in range(1, attempts + 1):
-        if stop_event is not None and stop_event.is_set():
-            raise DashScopePeerStoppedError(
-                "另一个 DashScope 分段失败，已停止后续请求。"
-            )
-        error: BaseException
-        try:
-            response = dashscope.MultiModalConversation.call(
-                model=model_name,
-                messages=messages,
-                result_format="message",
-                asr_options={"enable_lid": True, "enable_itn": False},
-                request_timeout=_DASHSCOPE_REQUEST_TIMEOUT_SECONDS,
-            )
-            language, text = _sdk_response(response)
-            return language, post_process(text)
-        except DashScopeResponseError as exc:
-            error = exc
-            retryable = _is_retryable_dashscope_response(exc)
-        except UserFacingError:
-            # A successful HTTP response with an invalid result is a protocol
-            # or parsing failure. Repeating it hides the real defect.
-            if stop_event is not None:
-                stop_event.set()
-            raise
-        except Exception as exc:
-            error = exc
-            retryable = _is_retryable_transport_exception(exc)
-
-        if not retryable or attempt == attempts:
-            # Signal directly in the worker before publishing the exception to
-            # the scheduler.  A retrying peer therefore cannot start another
-            # billable upload while the main thread is still observing this
-            # future's failure.
-            if stop_event is not None:
-                stop_event.set()
-            raise _dashscope_failure(error) from error
-        delay = _dashscope_retry_delay(attempt, error)
-        if stop_event is None:
-            time.sleep(delay)
-        elif stop_event.wait(delay):
-            raise DashScopePeerStoppedError(
-                "另一个 DashScope 分段失败，已停止后续请求。"
-            )
-
-    raise AssertionError("DashScope retry loop ended unexpectedly")
-
-
-def _transcribe_sdk_paths(
-    paths: Sequence[Path],
-    model_name: str,
-    context: str,
-    attempts: int,
-    post_process: Any,
-    worker_count: int,
-) -> list[tuple[str, str] | None]:
-    """Transcribe with at most one in-flight request per worker.
-
-    Keeping only a small sliding window prevents a failure in one segment from
-    leaving the rest of a long recording queued for upload (and billing).
-    Synchronous SDK calls cannot be interrupted mid-request, so every request
-    also has a fixed timeout and workers observe ``stop_event`` before retries.
-    """
-
-    ordered: list[tuple[str, str] | None] = [None] * len(paths)
-    if not paths:
-        return ordered
-
-    stop_event = threading.Event()
-    maximum_workers = min(worker_count, len(paths))
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=maximum_workers)
-    pending: dict[concurrent.futures.Future[tuple[str, str]], int] = {}
-    next_index = 0
-    completed = 0
-    succeeded = False
-
-    def submit(index: int) -> None:
-        pending[
-            executor.submit(
-                _call_dashscope_chunk,
-                paths[index],
-                model_name,
-                context,
-                attempts,
-                post_process,
-                stop_event,
-            )
-        ] = index
-
-    try:
-        while next_index < len(paths) and len(pending) < maximum_workers:
-            submit(next_index)
-            next_index += 1
-
-        while pending:
-            done, _ = concurrent.futures.wait(
-                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
-            )
-
-            # Resolve the whole completed batch before submitting replacements.
-            # If any item failed, no additional audio is uploaded.
-            batch: list[tuple[int, tuple[str, str]]] = []
-            terminal_errors: list[tuple[int, BaseException]] = []
-            for future in sorted(done, key=lambda item: pending[item]):
-                index = pending.pop(future)
-                try:
-                    batch.append((index, future.result()))
-                except DashScopePeerStoppedError:
-                    # The worker that set stop_event owns the useful root cause.
-                    # Keep waiting for it instead of replacing (for example) an
-                    # InvalidApiKey response with a generic peer-stop message.
-                    continue
-                except BaseException as exc:
-                    terminal_errors.append((index, exc))
-
-            if terminal_errors:
-                raise min(terminal_errors, key=lambda item: item[0])[1]
-
-            for index, result in batch:
-                ordered[index] = result
-            completed += len(batch)
-            if batch:
-                _progress(
-                    f"DashScope 转录 {completed}/{len(paths)}",
-                    0.12 + 0.80 * completed / len(paths),
-                )
-
-            # A terminal worker sets this before its Future becomes observable.
-            # Do not refill the sliding window in that interval; wait for the
-            # originating Future so its precise error reaches the user.
-            if stop_event.is_set():
-                if not pending:
-                    raise UserFacingError(
-                        "DashScope 分段失败，已停止后续请求。"
-                    )
-                continue
-
-            while next_index < len(paths) and len(pending) < maximum_workers:
-                submit(next_index)
-                next_index += 1
-
-        succeeded = True
-        return ordered
-    finally:
-        if not succeeded:
-            stop_event.set()
-            for future in pending:
-                future.cancel()
-        # At most ``maximum_workers`` calls can be running here. Their bounded
-        # request timeout plus cooperative retry cancellation makes cleanup
-        # finite and keeps the temporary WAV files alive until workers finish.
-        executor.shutdown(wait=True, cancel_futures=True)
-
-
-def _case_insensitive_field(value: dict[str, Any], field_name: str, default: Any = None) -> Any:
-    """Read System.Text.Json camelCase/PascalCase fields without guessing schemas."""
-
-    expected = re.sub(r"[^a-z0-9]", "", field_name.lower())
-    for key, item in value.items():
-        normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
-        if normalized == expected:
-            return item
-    return default
-
-
-def _timeline_integer(value: dict[str, Any], field_name: str, index: int) -> int:
-    raw = _case_insensitive_field(value, field_name)
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        raise UserFacingError(
-            f"说话人时间轴第 {index + 1} 段的 {field_name} 必须是整数。"
-        )
-    return raw
-
-
-def _normalise_speaker_turns(
-    turns: Sequence[SpeakerTurn], total_frames: int
-) -> tuple[list[SpeakerTurn], list[str]]:
-    """Turn sparse MOSS segments into non-overlapping, full-duration speaker runs.
-
-    Silence between two different speakers is divided at its midpoint. An
-    overlap is likewise divided at its midpoint and reported as a warning.
-    Fully nested turns remain ambiguous and are rejected: representing them
-    safely would require source separation rather than a linear timeline.
-    """
-
-    if total_frames <= 0:
-        raise UserFacingError("无法将说话人时间轴应用到空音频。")
-    ordered = sorted(turns, key=lambda item: (item.start_frame, item.end_frame, item.speaker_id))
-    if not ordered:
-        raise UserFacingError("说话人时间轴不包含 speakerId > 0 的有效分段。")
-
-    sequence: list[SpeakerTurn] = []
-    warnings: list[str] = []
-    for turn in ordered:
-        if turn.speaker_id <= 0 or turn.end_frame <= turn.start_frame:
-            continue
-        if sequence and sequence[-1].speaker_id == turn.speaker_id:
-            previous = sequence[-1]
-            sequence[-1] = SpeakerTurn(
-                min(previous.start_frame, turn.start_frame),
-                max(previous.end_frame, turn.end_frame),
-                turn.speaker_id,
-            )
-            continue
-        if sequence and turn.start_frame < sequence[-1].end_frame:
-            previous = sequence[-1]
-            overlap = previous.end_frame - turn.start_frame
-            if turn.end_frame <= previous.end_frame:
-                raise UserFacingError(
-                    "说话人时间轴含有不同说话人的嵌套分段，SDK 无法保证单一说话人切片。"
-                )
-            overlap_ms = round(overlap * 1000 / SAMPLE_RATE)
-            if overlap > _MAXIMUM_TOLERATED_SPEAKER_OVERLAP_FRAMES:
-                warnings.append(
-                    f"说话人时间轴中不同说话人重叠 {overlap_ms} ms；"
-                    "SDK 模式已在重叠区中点分割，该处说话人建议人工复核。"
-                )
-            else:
-                warnings.append("说话人时间轴存在轻微重叠，已在重叠区中点分割。")
-        sequence.append(turn)
-
-    if not sequence:
-        raise UserFacingError("说话人时间轴不包含 speakerId > 0 的有效分段。")
-    if len(sequence) == 1:
-        return [SpeakerTurn(0, total_frames, sequence[0].speaker_id)], warnings
-    if total_frames < len(sequence):
-        raise UserFacingError("说话人分段数量超过音频帧数，无法生成非空切片。")
-
-    boundaries: list[int] = []
-    for previous, current in zip(sequence, sequence[1:]):
-        # This midpoint handles either a silent gap or a tolerated overlap.
-        boundary = round((previous.end_frame + current.start_frame) / 2)
-        boundary = max(1, min(total_frames - 1, boundary))
-        if boundaries and boundary <= boundaries[-1]:
-            raise UserFacingError("说话人时间轴分段过密或顺序矛盾，无法安全切分。")
-        boundaries.append(boundary)
-
-    result: list[SpeakerTurn] = []
-    start = 0
-    for index, turn in enumerate(sequence):
-        end = boundaries[index] if index < len(boundaries) else total_frames
-        if end <= start:
-            raise UserFacingError("说话人时间轴产生了空分段，无法安全切分。")
-        result.append(SpeakerTurn(start, end, turn.speaker_id))
-        start = end
-    return result, list(dict.fromkeys(warnings))
-
-
-def _load_speaker_timeline(
-    path: Path, total_frames: int, audio_duration_ms: int
-) -> tuple[list[SpeakerTurn], list[str]]:
-    if not path.is_file():
-        raise UserFacingError(f"找不到说话人时间轴：{path}")
-    try:
-        if path.stat().st_size > 128 * 1024 * 1024:
-            raise UserFacingError("说话人时间轴 JSON 超过 128 MiB 限制。")
-        root = json.loads(path.read_text(encoding="utf-8-sig"))
-    except UserFacingError:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise UserFacingError(f"无法读取说话人时间轴 JSON：{exc}") from exc
-    if not isinstance(root, dict):
-        raise UserFacingError("说话人时间轴 JSON 根节点必须是对象。")
-
-    declared_duration = _case_insensitive_field(root, "durationMs")
-    if declared_duration is not None:
-        if isinstance(declared_duration, bool) or not isinstance(declared_duration, int):
-            raise UserFacingError("说话人时间轴 durationMs 必须是整数。")
-        tolerance_ms = max(2_000, round(audio_duration_ms * 0.02))
-        if abs(declared_duration - audio_duration_ms) > tolerance_ms:
-            raise UserFacingError(
-                f"说话人时间轴时长 {declared_duration} ms 与音频 {audio_duration_ms} ms 不匹配。"
-            )
-
-    items = _case_insensitive_field(root, "segments")
-    if items is None:
-        items = _case_insensitive_field(root, "turns")
-    if not isinstance(items, list):
-        raise UserFacingError("说话人时间轴 JSON 必须包含 segments 数组（或 turns 数组）。")
-
-    parsed: list[SpeakerTurn] = []
-    ignored_unknown = False
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise UserFacingError(f"说话人时间轴第 {index + 1} 段必须是对象。")
-        start_ms = _timeline_integer(item, "startMs", index)
-        end_ms = _timeline_integer(item, "endMs", index)
-        speaker_id = _timeline_integer(item, "speakerId", index)
-        if start_ms < 0 or end_ms <= start_ms:
-            raise UserFacingError(f"说话人时间轴第 {index + 1} 段时间范围无效。")
-        if start_ms >= audio_duration_ms:
-            raise UserFacingError(f"说话人时间轴第 {index + 1} 段起点超出音频时长。")
-        if speaker_id <= 0:
-            ignored_unknown = True
-            continue
-        start_frame = min(total_frames - 1, round(start_ms * SAMPLE_RATE / 1000))
-        end_frame = min(total_frames, round(end_ms * SAMPLE_RATE / 1000))
-        if end_frame <= start_frame:
-            raise UserFacingError(f"说话人时间轴第 {index + 1} 段换算后为空。")
-        parsed.append(SpeakerTurn(start_frame, end_frame, speaker_id))
-
-    runs, warnings = _normalise_speaker_turns(parsed, total_frames)
-    if ignored_unknown:
-        warnings.append("speakerId <= 0 的 MOSS 分段已忽略，相邻已知说话人在空档中点分界。")
-    return runs, warnings
-
-
-def _speaker_for_interval(start_frame: int, end_frame: int, runs: Sequence[SpeakerTurn]) -> int:
-    midpoint = start_frame + (end_frame - start_frame) // 2
-    for turn in runs:
-        if turn.start_frame <= midpoint < turn.end_frame:
-            return turn.speaker_id
-    raise UserFacingError("切片未能映射到说话人时间轴。")
-
-
-def _split_sdk_chunks_at_speaker_turns(
-    raw_chunks: Sequence[Any], wav: Any, runs: Sequence[SpeakerTurn]
-) -> list[SdkAudioChunk]:
-    result: list[SdkAudioChunk] = []
-    total_frames = len(wav)
-    speaker_boundaries = [turn.end_frame for turn in runs[:-1]]
-    for index, raw in enumerate(raw_chunks):
-        try:
-            start_frame = int(raw[0])
-            end_frame = int(raw[1])
-            samples = raw[2]
-        except (IndexError, KeyError, TypeError, ValueError) as exc:
-            raise UserFacingError(f"Silero VAD 第 {index + 1} 个分段格式无效。") from exc
-        if start_frame < 0 or end_frame <= start_frame or end_frame > total_frames:
-            raise UserFacingError(f"Silero VAD 第 {index + 1} 个分段超出音频范围。")
-        if not runs:
-            result.append(SdkAudioChunk(start_frame, end_frame, samples, 0))
-            continue
-
-        boundaries = [start_frame]
-        boundaries.extend(
-            boundary for boundary in speaker_boundaries if start_frame < boundary < end_frame
-        )
-        boundaries.append(end_frame)
-        for piece_start, piece_end in zip(boundaries, boundaries[1:]):
-            if piece_end <= piece_start:
-                continue
-            # Slice from the original waveform, not VAD's derived buffer, so
-            # speaker transitions remain sample-accurate.
-            result.append(
-                SdkAudioChunk(
-                    piece_start,
-                    piece_end,
-                    wav[piece_start:piece_end],
-                    _speaker_for_interval(piece_start, piece_end, runs),
-                )
-            )
-    if not result:
-        raise UserFacingError("Silero VAD 没有产生可上传的音频分段。")
-    return result
-
-
-def _run_sdk(args: argparse.Namespace, audio: Path, info: WavInfo) -> dict[str, Any]:
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
-    if not api_key:
-        raise UserFacingError("SDK 模式需要环境变量 DASHSCOPE_API_KEY；密钥不接受命令行传入。")
-    try:
-        import dashscope
-        from silero_vad import load_silero_vad
-        from qwen3_asr_toolkit.audio_tools import load_audio, process_vad, save_audio_file
-        from qwen3_asr_toolkit.qwen3asr import QwenASR
-    except ImportError as exc:
-        raise UserFacingError(f"Qwen SDK 运行时不完整：{exc}") from exc
-
-    dashscope.api_key = api_key
-    _progress("正在用官方 Silero VAD 切分长音频…", 0.05)
-    wav = load_audio(str(audio))
-    if abs(len(wav) - info.frames) > 1:
-        raise UserFacingError(
-            f"官方音频加载器返回 {len(wav)} 帧，但 WAV 包含 {info.frames} 帧；"
-            "为避免时间轴错位，已停止。"
-        )
-    speaker_runs: list[SpeakerTurn] = []
-    timeline_warnings: list[str] = []
-    if args.speaker_timeline:
-        timeline_path = Path(args.speaker_timeline).expanduser().resolve()
-        speaker_runs, timeline_warnings = _load_speaker_timeline(
-            timeline_path, len(wav), info.duration_ms
-        )
-        _progress(
-            f"已读取 MOSS 说话人时间轴：{len(speaker_runs)} 个连续区间",
-            0.07,
-        )
-    vad_model = load_silero_vad(onnx=True)
-    # Keep segments deliberately short.  The API does not return word timestamps,
-    # so these boundaries are also the finest honest timeline we can expose to
-    # the diarization merger.  With the default this targets 10 s and hard-caps
-    # uninterrupted speech at 15 s.
-    maximum_seconds = min(180, args.sdk_segment_seconds + 5)
-    raw_vad_chunks = process_vad(
-        wav,
-        vad_model,
-        segment_threshold_s=args.sdk_segment_seconds,
-        max_segment_threshold_s=maximum_seconds,
-    )
-    if not raw_vad_chunks:
-        raise UserFacingError("Silero VAD 没有产生可上传的音频分段。")
-    wav_chunks = _split_sdk_chunks_at_speaker_turns(raw_vad_chunks, wav, speaker_runs)
-    post_process = QwenASR(model=args.sdk_model).post_text_process
-    qualifier = "VAD/说话人" if speaker_runs else "VAD"
-    _progress(f"音频已分为 {len(wav_chunks)} 个 {qualifier} 分段", 0.10)
-
-    with _temporary_audio_directory(args.output, "sdk") as temporary:
-        temp_dir = Path(temporary)
-        paths: list[Path] = []
-        for index, chunk in enumerate(wav_chunks):
-            path = temp_dir / f"sdk-{index:05d}.wav"
-            save_audio_file(chunk.samples, str(path))
-            paths.append(path)
-
-        ordered = _transcribe_sdk_paths(
-            paths,
-            args.sdk_model,
-            args.context,
-            args.sdk_retries,
-            post_process,
-            args.sdk_workers,
-        )
-
-    segments: list[dict[str, Any]] = []
-    texts: list[str] = []
-    languages: list[str] = []
-    for index, (chunk, result) in enumerate(zip(wav_chunks, ordered)):
-        if result is None:
-            raise UserFacingError(f"DashScope 第 {index + 1} 段没有返回结果。")
-        language, text = result
-        languages.append(language)
-        if not text:
-            continue
-        texts.append(text)
-        segments.append(
-            {
-                "startMs": round(chunk.start_frame * 1000 / SAMPLE_RATE),
-                "endMs": min(info.duration_ms, round(chunk.end_frame * 1000 / SAMPLE_RATE)),
-                "speakerId": chunk.speaker_id,
-                "text": text,
-            }
-        )
-    if not texts:
-        raise UserFacingError("DashScope Qwen 未识别到可输出的语音文字。")
-
-    warnings = [
-        "SDK 模式需要联网，并会将 VAD 分段音频上传到 DashScope。",
-        f"SDK 时间轴是 Silero VAD 分块边界（目标 {args.sdk_segment_seconds} 秒，"
-        f"硬上限 {maximum_seconds} 秒），不是逐词强制对齐；本地高精度模式的时间轴更细。",
-    ]
-    warnings.extend(timeline_warnings)
-    if speaker_runs:
-        warnings.append(
-            "SDK 音频已在上传前按 MOSS 说话人转换边界进一步切开；"
-            "每个上传分段仅对应一个归一化说话人区间。"
-        )
-    if args.language != "auto":
-        warnings.append("Qwen3-ASR-Flash SDK 官方接口会自动识别语言；--language 会被记录作为回退值，不能强制服务端语言。")
-    full_text = "\n".join(texts).strip()
-    return {
-        "sourceFileName": audio.name,
-        "durationMs": info.duration_ms,
-        "model": args.sdk_model,
-        "engineVersion": (
-            f"dashscope {_package_version('dashscope')}; "
-            f"qwen3-asr-toolkit {_package_version('qwen3-asr-toolkit')}"
-        ),
-        "backend": "dashscope-sdk",
-        "language": _dominant_language(languages, args.language),
-        "fullText": full_text,
-        "rawText": full_text,
-        "segments": segments,
-        "warnings": list(dict.fromkeys(warnings)),
-        "isPartial": False,
-    }
-
-
 def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -1245,8 +751,8 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = JsonArgumentParser(description="InterviewScribe Qwen sidecar", allow_abbrev=False)
-    parser.add_argument("--mode", required=True, choices=("local", "sdk"))
+    parser = JsonArgumentParser(description="InterviewScribe local Qwen sidecar", allow_abbrev=False)
+    parser.add_argument("--mode", required=True, choices=("local",))
     parser.add_argument("--audio", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument(
@@ -1261,56 +767,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--chunk-seconds", type=int)
     parser.add_argument("--max-new-tokens", type=int)
-
-    parser.add_argument("--sdk-model")
-    parser.add_argument("--sdk-workers", type=int)
-    parser.add_argument("--sdk-segment-seconds", type=int)
-    parser.add_argument("--sdk-retries", type=int)
-    parser.add_argument(
-        "--speaker-timeline",
-        help="SDK only: MOSS EngineResult JSON whose segments define speaker boundaries",
-    )
     return parser
 
 
 def _validate_arguments(args: argparse.Namespace) -> None:
-    local_names = ("model_dir", "aligner_dir", "device", "chunk_seconds", "max_new_tokens")
-    sdk_names = (
-        "sdk_model",
-        "sdk_workers",
-        "sdk_segment_seconds",
-        "sdk_retries",
-        "speaker_timeline",
-    )
-    if args.mode == "local":
-        if not args.model_dir or not args.aligner_dir:
-            raise UserFacingError("local 模式必须提供 --model-dir 和 --aligner-dir。")
-        if args.speaker_timeline is not None:
-            raise UserFacingError("--speaker-timeline 仅支持 sdk 模式。")
-        if any(getattr(args, name) is not None for name in sdk_names[:-1]):
-            raise UserFacingError("local 模式不接受 --sdk-* 参数。")
-        args.device = args.device if args.device is not None else "auto"
-        args.chunk_seconds = args.chunk_seconds if args.chunk_seconds is not None else 240
-        args.max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else 4096
-        if not 30 <= args.chunk_seconds <= 285:
-            raise UserFacingError("--chunk-seconds 必须在 30–285 之间。")
-        if not 128 <= args.max_new_tokens <= 8192:
-            raise UserFacingError("--max-new-tokens 必须在 128–8192 之间。")
-    else:
-        if any(getattr(args, name) is not None for name in local_names):
-            raise UserFacingError("sdk 模式不接受本地模型或 --device/--chunk-seconds 参数。")
-        args.sdk_model = args.sdk_model if args.sdk_model is not None else "qwen3-asr-flash"
-        args.sdk_workers = args.sdk_workers if args.sdk_workers is not None else 2
-        args.sdk_segment_seconds = args.sdk_segment_seconds if args.sdk_segment_seconds is not None else 10
-        args.sdk_retries = args.sdk_retries if args.sdk_retries is not None else 3
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.sdk_model):
-            raise UserFacingError("--sdk-model 格式无效。")
-        if not 1 <= args.sdk_workers <= 8:
-            raise UserFacingError("--sdk-workers 必须在 1–8 之间。")
-        if not 10 <= args.sdk_segment_seconds <= 120:
-            raise UserFacingError("--sdk-segment-seconds 必须在 10–120 之间。")
-        if not 1 <= args.sdk_retries <= 5:
-            raise UserFacingError("--sdk-retries 必须在 1–5 之间。")
+    if not args.model_dir or not args.aligner_dir:
+        raise UserFacingError("local 模式必须提供 --model-dir 和 --aligner-dir。")
+    args.device = args.device if args.device is not None else "auto"
+    # The official ForcedAligner supports up to five minutes in its combined
+    # wrapper, but our sequential low-VRAM path loads it directly.  Keep each
+    # input below 180 seconds and default conservatively for 8 GB GPUs.
+    args.chunk_seconds = args.chunk_seconds if args.chunk_seconds is not None else 150
+    # The official wrapper does not expose whether generation stopped at its
+    # token cap. Use a deliberately high ceiling so a rapid 180-second
+    # recording is not silently marked complete after truncation. Dynamic cache
+    # allocation grows with actual output, rather than reserving this ceiling.
+    args.max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else 8192
+    if not 30 <= args.chunk_seconds <= 180:
+        raise UserFacingError("--chunk-seconds 必须在 30–180 之间。")
+    if not 128 <= args.max_new_tokens <= 8192:
+        raise UserFacingError("--max-new-tokens 必须在 128–8192 之间。")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1321,11 +797,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = Path(args.output).expanduser().resolve()
         if audio == output:
             raise UserFacingError("--output 不能覆盖输入 WAV。")
-        if args.speaker_timeline and output == Path(args.speaker_timeline).expanduser().resolve():
-            raise UserFacingError("--output 不能覆盖 --speaker-timeline JSON。")
         info = _validate_wav(audio)
         _progress("已验证 16 kHz 单声道 PCM WAV", 0.01)
-        result = _run_local(args, audio, info) if args.mode == "local" else _run_sdk(args, audio, info)
+        result = _run_local(args, audio, info)
         _progress("正在原子写入识别结果…", 0.98)
         _atomic_write_json(output, result)
         _progress("识别完成", 1.0)

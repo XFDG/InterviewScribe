@@ -6,8 +6,8 @@ param(
     [switch]$SkipLocalModels
 )
 
-# This installer intentionally accepts authentication only through HF_TOKEN.
-# Never add a token parameter: process command lines are visible to other tools.
+# Qwen's official ModelScope repositories are public.  Do not add token
+# parameters here: command lines are visible to other local processes.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -53,43 +53,33 @@ if ([string]::IsNullOrWhiteSpace($DependencyLockPath)) {
 }
 
 $DependencyLock = Get-Content -LiteralPath $DependencyLockPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$MossDescriptor = $DependencyLock.models.mossTranscribeDiarizeQ8
-$AsrDescriptor = $DependencyLock.models.qwen3Asr17bHf
-$AlignerDescriptor = $DependencyLock.models.qwen3ForcedAligner06bHf
-if ($null -eq $MossDescriptor -or $null -eq $AsrDescriptor -or $null -eq $AlignerDescriptor) {
-    throw "dependencies.lock.json does not contain all required model descriptors."
+$AsrDescriptor = $DependencyLock.models.qwen3Asr17bModelScope
+$AlignerDescriptor = $DependencyLock.models.qwen3ForcedAligner06bModelScope
+if ($null -eq $AsrDescriptor -or $null -eq $AlignerDescriptor) {
+    throw "dependencies.lock.json does not contain both required ModelScope Qwen descriptors."
 }
 
 $AsrRepository = [string]$AsrDescriptor.repository
 $AsrRevision = [string]$AsrDescriptor.revision
 $AlignerRepository = [string]$AlignerDescriptor.repository
 $AlignerRevision = [string]$AlignerDescriptor.revision
-$MossFileName = [string]$MossDescriptor.fileName
-$MossUrl = [string]$MossDescriptor.url
-$MossExpectedBytes = [long]$MossDescriptor.fileSizeBytes
-$MossSha256 = [string]$MossDescriptor.sha256
 
 if ([string]::IsNullOrWhiteSpace($AsrRepository) -or
-    [string]::IsNullOrWhiteSpace($AsrRevision) -or
+    $AsrRevision -notmatch '^[0-9a-fA-F]{40}$' -or
     [string]::IsNullOrWhiteSpace($AlignerRepository) -or
-    [string]::IsNullOrWhiteSpace($AlignerRevision) -or
-    [string]::IsNullOrWhiteSpace($MossFileName) -or
-    [System.IO.Path]::GetFileName($MossFileName) -ne $MossFileName -or
-    -not [Uri]::IsWellFormedUriString($MossUrl, [UriKind]::Absolute) -or
-    -not $MossUrl.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase) -or
-    $MossExpectedBytes -le 0 -or
-    $MossSha256 -notmatch '^[0-9a-fA-F]{64}$') {
-    throw "dependencies.lock.json contains an invalid model descriptor."
+    $AlignerRevision -notmatch '^[0-9a-fA-F]{40}$' -or
+    $null -eq $AsrDescriptor.files -or
+    $null -eq $AlignerDescriptor.files) {
+    throw "dependencies.lock.json contains an invalid ModelScope Qwen descriptor."
 }
 
 $InstallRoot = Join-Path $env:LOCALAPPDATA "InterviewScribe"
 $RuntimeRoot = Join-Path $InstallRoot "qwen-runtime"
 $VenvRoot = Join-Path $RuntimeRoot ".venv"
 $PythonExe = Join-Path $VenvRoot "Scripts\python.exe"
-$ModelsRoot = Join-Path $InstallRoot "models"
-$AsrDestination = Join-Path $ModelsRoot "Qwen3-ASR-1.7B-hf"
-$AlignerDestination = Join-Path $ModelsRoot "Qwen3-ForcedAligner-0.6B-hf"
-$MossDestination = Join-Path $ModelsRoot $MossFileName
+$QwenModelScopeRoot = Join-Path $InstallRoot "ModelScope-Qwen3"
+$AsrDestination = Join-Path $QwenModelScopeRoot "Qwen3-ASR-1.7B"
+$AlignerDestination = Join-Path $QwenModelScopeRoot "Qwen3-ForcedAligner-0.6B"
 
 function Invoke-Checked {
     param(
@@ -99,6 +89,31 @@ function Invoke-Checked {
     & $Program @CommandArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code $LASTEXITCODE`: $Program"
+    }
+}
+
+function Invoke-PythonTextFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Program,
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    # Windows PowerShell's legacy native-command argument marshalling removes
+    # quotes embedded in a multi-line `python -c` program.  That produced the
+    # user-visible `transformers: 5.17.0` SyntaxError.  A securely created,
+    # short-lived .py file preserves the source byte-for-byte and avoids putting
+    # Python source in the process command line.
+    $temporaryPath = Join-Path $RuntimeRoot ".installer-$Purpose-$([Guid]::NewGuid().ToString('N')).py"
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporaryPath,
+            $Source,
+            [System.Text.UTF8Encoding]::new($false))
+        Invoke-Checked -Program $Program -CommandArguments @($temporaryPath)
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -164,42 +179,23 @@ function Get-CompatibleBasePython {
     )
 }
 
-function Test-InstalledSnapshot {
+function Get-SafeSnapshotFilePath {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][string]$Revision
+        [Parameter(Mandatory = $true)][string]$RelativePath
     )
-    $MarkerPath = Join-Path $Destination $RevisionMarker
-    $ConfigPath = Join-Path $Destination "config.json"
-    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { return $false }
-    if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { return $false }
-    $MarkerValue = (Get-Content -LiteralPath $MarkerPath -Raw).Trim()
-    if ($MarkerValue -ne $Revision) { return $false }
-    $IndexPath = Join-Path $Destination "model.safetensors.index.json"
-    if (Test-Path -LiteralPath $IndexPath -PathType Leaf) {
-        try {
-            $Index = Get-Content -LiteralPath $IndexPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $WeightFiles = @($Index.weight_map.PSObject.Properties.Value | Sort-Object -Unique)
-            if ($WeightFiles.Count -eq 0) { return $false }
-            $NormalizedRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-            foreach ($WeightFileValue in $WeightFiles) {
-                $WeightFile = [string]$WeightFileValue
-                $FullWeightPath = [System.IO.Path]::GetFullPath((Join-Path $NormalizedRoot $WeightFile))
-                if (-not $FullWeightPath.StartsWith($NormalizedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    return $false
-                }
-                if (-not (Test-Path -LiteralPath $FullWeightPath -PathType Leaf)) { return $false }
-                if ((Get-Item -LiteralPath $FullWeightPath).Length -le 0) { return $false }
-            }
-            return $true
-        }
-        catch {
-            return $false
-        }
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath)) {
+        return $null
     }
 
-    $Weights = @(Get-ChildItem -LiteralPath $Destination -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
-    return ($Weights.Count -gt 0 -and @($Weights | Where-Object { $_.Length -le 0 }).Count -eq 0)
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\', '/') +
+        [System.IO.Path]::DirectorySeparatorChar
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $normalizedRoot $RelativePath))
+    if (-not $candidate.StartsWith($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    return $candidate
 }
 
 function Test-PinnedFile {
@@ -211,165 +207,183 @@ function Test-PinnedFile {
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     if ((Get-Item -LiteralPath $Path).Length -ne $ExpectedBytes) { return $false }
-    $ActualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    return $ActualSha256 -eq $ExpectedSha256.ToLowerInvariant()
+    $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    return $actualSha256 -eq $ExpectedSha256.ToLowerInvariant()
 }
 
-function Publish-PinnedMossPartial {
+function Test-ModelScopeSnapshotFiles {
     param(
-        [Parameter(Mandatory = $true)][string]$PartialPath
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][object]$Descriptor
     )
 
-    if (-not (Test-Path -LiteralPath $PartialPath -PathType Leaf)) { return $false }
-    $PartialLength = (Get-Item -LiteralPath $PartialPath).Length
-    if ($PartialLength -ne $MossExpectedBytes) {
-        if ($PartialLength -gt $MossExpectedBytes) {
-            Remove-Item -LiteralPath $PartialPath -Force
-        }
-        return $false
-    }
+    if (-not (Test-Path -LiteralPath $Destination -PathType Container)) { return $false }
+    $files = @($Descriptor.files)
+    if ($files.Count -eq 0) { return $false }
 
-    if (-not (Test-PinnedFile -Path $PartialPath -ExpectedBytes $MossExpectedBytes -ExpectedSha256 $MossSha256)) {
-        Remove-Item -LiteralPath $PartialPath -Force
-        return $false
-    }
-
-    if (Test-Path -LiteralPath $MossDestination -PathType Leaf) {
-        $BackupPath = "$MossDestination.invalid-$([Guid]::NewGuid().ToString('N'))"
-        try {
-            [System.IO.File]::Replace($PartialPath, $MossDestination, $BackupPath, $true)
-        }
-        finally {
-            Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
+    $seenPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $files) {
+        $relativePath = [string]$file.path
+        $expectedBytes = [long]$file.fileSizeBytes
+        $expectedSha256 = [string]$file.sha256
+        $fullPath = Get-SafeSnapshotFilePath -Destination $Destination -RelativePath $relativePath
+        if ($null -eq $fullPath -or
+            -not $seenPaths.Add($relativePath) -or
+            $expectedBytes -le 0 -or
+            $expectedSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+            -not (Test-PinnedFile -Path $fullPath -ExpectedBytes $expectedBytes -ExpectedSha256 $expectedSha256)) {
+            return $false
         }
     }
-    else {
-        Move-Item -LiteralPath $PartialPath -Destination $MossDestination
-    }
 
-    Write-Host "Installed MOSS speaker model: $MossDestination"
     return $true
 }
 
-function Install-PinnedMossModel {
-    if (Test-PinnedFile -Path $MossDestination -ExpectedBytes $MossExpectedBytes -ExpectedSha256 $MossSha256) {
-        Write-Host "Verified MOSS speaker model: $MossDestination"
-        return
-    }
+function Write-RevisionMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Revision
+    )
 
-    $CurlCommand = Get-Command "curl.exe" -ErrorAction SilentlyContinue
-    if ($null -eq $CurlCommand) {
-        throw "curl.exe was not found. Install the Windows curl component, then run this script again."
-    }
-
-    $PartialPath = "$MossDestination.part"
-    if (Publish-PinnedMossPartial -PartialPath $PartialPath) {
-        return
-    }
-
-    for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
-        try {
-            Write-Host "Downloading pinned MOSS speaker model (attempt $Attempt/3; resume enabled) ..."
-            Invoke-Checked -Program $CurlCommand.Source -CommandArguments @(
-                "--fail", "--location", "--retry", "2", "--retry-delay", "2",
-                "--continue-at", "-", "--output", $PartialPath, $MossUrl
-            )
-
-            if (-not (Publish-PinnedMossPartial -PartialPath $PartialPath)) {
-                Remove-Item -LiteralPath $PartialPath -Force -ErrorAction SilentlyContinue
-                throw "MOSS model size or SHA-256 validation failed."
-            }
-
-            return
+    $markerPath = Join-Path $Destination $RevisionMarker
+    $temporaryPath = "$markerPath.tmp-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporaryPath,
+            "$Revision`n",
+            [System.Text.UTF8Encoding]::new($false))
+        if ([System.IO.File]::Exists($markerPath)) {
+            [System.IO.File]::Replace($temporaryPath, $markerPath, $null)
         }
-        catch {
-            if ($Attempt -eq 3) { throw }
-            Write-Warning "MOSS model download attempt $Attempt/3 failed: $($_.Exception.Message)"
+        else {
+            [System.IO.File]::Move($temporaryPath, $markerPath)
         }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Install-PinnedSnapshot {
+function Test-InstalledSnapshot {
     param(
-        [Parameter(Mandatory = $true)][string]$Repository,
-        [Parameter(Mandatory = $true)][string]$Revision,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][object]$Descriptor
+    )
+
+    $markerPath = Join-Path $Destination $RevisionMarker
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
+    try {
+        $markerValue = (Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8).Trim()
+    }
+    catch {
+        return $false
+    }
+    if ($markerValue -ne [string]$Descriptor.revision) { return $false }
+    return Test-ModelScopeSnapshotFiles -Destination $Destination -Descriptor $Descriptor
+}
+
+function Install-PinnedModelScopeSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][object]$Descriptor,
         [Parameter(Mandatory = $true)][string]$Destination
     )
 
-    if (Test-InstalledSnapshot -Destination $Destination -Revision $Revision) {
-        Write-Host "Verified model snapshot: $Destination"
+    $repository = [string]$Descriptor.repository
+    $revision = [string]$Descriptor.revision
+    if (Test-InstalledSnapshot -Destination $Destination -Descriptor $Descriptor) {
+        Write-Host "Verified ModelScope model snapshot: $Destination"
         return
     }
 
-    $Staging = "$Destination.staging-$([Guid]::NewGuid().ToString('N'))"
-    $Backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
-    $MovedExisting = $false
-    New-Item -ItemType Directory -Path $Staging -Force | Out-Null
+    # A user may already have followed Qwen's official `modelscope download`
+    # instructions.  Adopt that exact, hash-verified data instead of wasting a
+    # second 6+ GB download; the marker is written only after full validation.
+    if (Test-ModelScopeSnapshotFiles -Destination $Destination -Descriptor $Descriptor) {
+        Write-RevisionMarker -Destination $Destination -Revision $revision
+        Write-Host "Verified and adopted existing ModelScope model: $Destination"
+        return
+    }
 
-    $DownloadCode = @'
+    $staging = "$Destination.staging-$([Guid]::NewGuid().ToString('N'))"
+    $backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
+    $movedExisting = $false
+    $hadDownloadRepository = Test-Path Env:\INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY
+    $hadDownloadRevision = Test-Path Env:\INTERVIEWSCRIBE_DOWNLOAD_REVISION
+    $hadDownloadDestination = Test-Path Env:\INTERVIEWSCRIBE_DOWNLOAD_DESTINATION
+    $previousDownloadRepository = $env:INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY
+    $previousDownloadRevision = $env:INTERVIEWSCRIBE_DOWNLOAD_REVISION
+    $previousDownloadDestination = $env:INTERVIEWSCRIBE_DOWNLOAD_DESTINATION
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+
+    $downloadCode = @'
 import os
 from pathlib import Path
-from huggingface_hub import snapshot_download
+from modelscope import snapshot_download
 
 repository = os.environ["INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY"]
 revision = os.environ["INTERVIEWSCRIBE_DOWNLOAD_REVISION"]
 destination = Path(os.environ["INTERVIEWSCRIBE_DOWNLOAD_DESTINATION"])
-token = os.environ.get("HF_TOKEN") or None
 
 snapshot_download(
-    repo_id=repository,
+    model_id=repository,
     revision=revision,
     local_dir=str(destination),
-    token=token,
 )
-
-if not (destination / "config.json").is_file():
-    raise RuntimeError("Downloaded snapshot is missing config.json")
-if not any(destination.glob("*.safetensors")):
-    raise RuntimeError("Downloaded snapshot is missing safetensors weights")
-
-marker = destination / ".interviewscribe-revision"
-temporary = destination / (marker.name + ".tmp")
-with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-    stream.write(revision + "\n")
-    stream.flush()
-    os.fsync(stream.fileno())
-os.replace(temporary, marker)
 '@
 
     try {
-        $env:INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY = $Repository
-        $env:INTERVIEWSCRIBE_DOWNLOAD_REVISION = $Revision
-        $env:INTERVIEWSCRIBE_DOWNLOAD_DESTINATION = $Staging
-        Write-Host "Downloading pinned snapshot $Repository at $Revision ..."
-        Invoke-Checked -Program $PythonExe -CommandArguments @("-c", $DownloadCode)
+        $env:INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY = $repository
+        $env:INTERVIEWSCRIBE_DOWNLOAD_REVISION = $revision
+        $env:INTERVIEWSCRIBE_DOWNLOAD_DESTINATION = $staging
+        Write-Host "Downloading pinned ModelScope snapshot $repository at $revision ..."
+        Invoke-PythonTextFile -Program $PythonExe -Source $downloadCode -Purpose "modelscope-download"
 
-        if (-not (Test-InstalledSnapshot -Destination $Staging -Revision $Revision)) {
-            throw "Snapshot validation failed after download: $Repository"
+        if (-not (Test-ModelScopeSnapshotFiles -Destination $staging -Descriptor $Descriptor)) {
+            throw "ModelScope snapshot hash or completeness validation failed after download: $repository"
+        }
+        Write-RevisionMarker -Destination $staging -Revision $revision
+        if (-not (Test-InstalledSnapshot -Destination $staging -Descriptor $Descriptor)) {
+            throw "ModelScope snapshot marker validation failed after download: $repository"
         }
         if (Test-Path -LiteralPath $Destination) {
-            Move-Item -LiteralPath $Destination -Destination $Backup
-            $MovedExisting = $true
+            Move-Item -LiteralPath $Destination -Destination $backup
+            $movedExisting = $true
         }
-        Move-Item -LiteralPath $Staging -Destination $Destination
-        Write-Host "Installed model snapshot: $Destination"
-        if ($MovedExisting) {
-            Write-Warning "The previous invalid snapshot was retained at: $Backup"
+        Move-Item -LiteralPath $staging -Destination $Destination
+        Write-Host "Installed ModelScope model snapshot: $Destination"
+        if ($movedExisting) {
+            Write-Warning "The previous invalid snapshot was retained at: $backup"
         }
     }
     catch {
-        if ($MovedExisting -and -not (Test-Path -LiteralPath $Destination) -and (Test-Path -LiteralPath $Backup)) {
-            Move-Item -LiteralPath $Backup -Destination $Destination
+        if ($movedExisting -and -not (Test-Path -LiteralPath $Destination) -and (Test-Path -LiteralPath $backup)) {
+            Move-Item -LiteralPath $backup -Destination $Destination
         }
-        if (Test-Path -LiteralPath $Staging) {
-            Remove-Item -LiteralPath $Staging -Recurse -Force
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
         }
         throw
     }
     finally {
-        Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY -ErrorAction SilentlyContinue
-        Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_REVISION -ErrorAction SilentlyContinue
-        Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_DESTINATION -ErrorAction SilentlyContinue
+        if ($hadDownloadRepository) {
+            $env:INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY = $previousDownloadRepository
+        }
+        else {
+            Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_REPOSITORY -ErrorAction SilentlyContinue
+        }
+        if ($hadDownloadRevision) {
+            $env:INTERVIEWSCRIBE_DOWNLOAD_REVISION = $previousDownloadRevision
+        }
+        else {
+            Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_REVISION -ErrorAction SilentlyContinue
+        }
+        if ($hadDownloadDestination) {
+            $env:INTERVIEWSCRIBE_DOWNLOAD_DESTINATION = $previousDownloadDestination
+        }
+        else {
+            Remove-Item Env:\INTERVIEWSCRIBE_DOWNLOAD_DESTINATION -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -380,8 +394,8 @@ if (-not $env:LOCALAPPDATA) {
 $EffectiveTorchBackend = $TorchBackend
 if ($TorchBackend -eq "Auto") {
     if ($SkipLocalModels) {
-        # SDK mode only needs local VAD/post-processing, so avoid installing a
-        # multi-gigabyte CUDA runtime that will never run Qwen inference.
+        # Runtime-only repair does not run local Qwen inference, so avoid a
+        # multi-gigabyte CUDA download when models were explicitly skipped.
         $EffectiveTorchBackend = "Cpu"
     }
     else {
@@ -402,7 +416,7 @@ if ($TorchBackend -eq "Auto") {
 Write-Host "Selected PyTorch backend: $EffectiveTorchBackend (requested: $TorchBackend)"
 
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
-New-Item -ItemType Directory -Path $ModelsRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $QwenModelScopeRoot -Force | Out-Null
 
 if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     $BasePython = Get-CompatibleBasePython
@@ -419,7 +433,7 @@ elseif (-not (Test-CompatiblePython -PythonPath $PythonExe)) {
 Invoke-Checked -Program $PythonExe -CommandArguments @("-m", "pip", "install", "--upgrade", "pip")
 
 # This pair uses PyTorch's stable ABI for torchaudio.  It is intentionally kept
-# independent from the PyPI resolver so qwen3-asr-toolkit cannot replace it.
+# independent from the PyPI resolver so optional Qwen packages cannot replace it.
 $ExpectedTorchVersion = if ($EffectiveTorchBackend -eq "Cuda") { "2.11.0+cu130" } else { "2.11.0+cpu" }
 $ExpectedTorchaudioVersion = if ($EffectiveTorchBackend -eq "Cuda") { "2.11.0+cu130" } else { "2.11.0+cpu" }
 $TorchIndexUrl = if ($EffectiveTorchBackend -eq "Cuda") {
@@ -444,16 +458,26 @@ else {
     )
 }
 
-Write-Host "Installing pinned Qwen local and SDK dependencies ..."
+Write-Host "Installing pinned local Qwen + ModelScope dependencies ..."
+# The retired qwen3-asr-toolkit pins an incompatible Transformers API and is
+# not used by this local backend. Remove it from the application-owned
+# environment before installing Qwen's official local package.
+& $PythonExe -m pip uninstall --yes qwen3-asr-toolkit
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not remove the retired qwen3-asr-toolkit package (exit code $LASTEXITCODE)."
+}
 Invoke-Checked -Program $PythonExe -CommandArguments @(
     "-m", "pip", "install", "--extra-index-url", $TorchIndexUrl,
     "torch==$ExpectedTorchVersion",
     "torchaudio==$ExpectedTorchaudioVersion",
-    "transformers==5.17.0",
-    "huggingface-hub==1.32.0",
-    "qwen3-asr-toolkit==1.0.4",
-    "dashscope==1.27.6",
-    "silero-vad[onnx-cpu]==6.2.1"
+    "transformers==4.57.6",
+    "accelerate==1.12.0",
+    "nagisa==0.2.11",
+    "soynlp==0.0.493",
+    "librosa==0.11.0",
+    "soundfile==0.13.1",
+    "qwen-asr==0.0.6",
+    "modelscope==1.40.1"
 )
 Invoke-Checked -Program $PythonExe -CommandArguments @("-m", "pip", "check")
 
@@ -463,35 +487,35 @@ import os
 import torch
 import torchaudio
 import transformers
-from qwen3_asr_toolkit.audio_tools import load_audio, process_vad, save_audio_file
-from qwen3_asr_toolkit.qwen3asr import QwenASR
-from silero_vad import load_silero_vad
+import modelscope
+from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
 
 expected = {
     "torch": os.environ["INTERVIEWSCRIBE_EXPECTED_TORCH"],
     "torchaudio": os.environ["INTERVIEWSCRIBE_EXPECTED_TORCHAUDIO"],
-    "transformers": "5.17.0",
-    "huggingface-hub": "1.32.0",
-    "qwen3-asr-toolkit": "1.0.4",
-    "dashscope": "1.27.6",
-    "silero-vad": "6.2.1",
+    "transformers": "4.57.6",
+    "accelerate": "1.12.0",
+    "nagisa": "0.2.11",
+    "soynlp": "0.0.493",
+    "librosa": "0.11.0",
+    "soundfile": "0.13.1",
+    "qwen-asr": "0.0.6",
+    "modelscope": "1.40.1",
 }
 for package, version in expected.items():
     actual = metadata.version(package)
     if actual != version:
         raise RuntimeError(f"{package}: expected {version}, got {actual}")
-for name in ("AutoProcessor", "AutoModelForMultimodalLM", "AutoModelForTokenClassification"):
+for name in ("AutoConfig", "AutoModel", "AutoProcessor"):
     if not hasattr(transformers, name):
         raise RuntimeError(f"transformers is missing {name}")
 for name, value in {
-    "load_audio": load_audio,
-    "process_vad": process_vad,
-    "save_audio_file": save_audio_file,
-    "QwenASR.post_text_process": QwenASR(model="qwen3-asr-flash").post_text_process,
+    "Qwen3ASRModel.from_pretrained": Qwen3ASRModel.from_pretrained,
+    "Qwen3ForcedAligner.from_pretrained": Qwen3ForcedAligner.from_pretrained,
+    "modelscope.snapshot_download": modelscope.snapshot_download,
 }.items():
     if not callable(value):
-        raise RuntimeError(f"qwen3-asr-toolkit is missing callable {name}")
-load_silero_vad(onnx=True)
+        raise RuntimeError(f"local Qwen runtime is missing callable {name}")
 backend = os.environ["INTERVIEWSCRIBE_EXPECTED_TORCH_BACKEND"]
 if backend == "Cuda":
     if torch.version.cuda != "13.0":
@@ -510,7 +534,7 @@ try {
     $env:INTERVIEWSCRIBE_EXPECTED_TORCH = $ExpectedTorchVersion
     $env:INTERVIEWSCRIBE_EXPECTED_TORCHAUDIO = $ExpectedTorchaudioVersion
     $env:INTERVIEWSCRIBE_EXPECTED_TORCH_BACKEND = $EffectiveTorchBackend
-    Invoke-Checked -Program $PythonExe -CommandArguments @("-c", $SmokeTest)
+    Invoke-PythonTextFile -Program $PythonExe -Source $SmokeTest -Purpose "smoke-test"
 }
 finally {
     Remove-Item Env:\INTERVIEWSCRIBE_EXPECTED_TORCH -ErrorAction SilentlyContinue
@@ -518,28 +542,24 @@ finally {
     Remove-Item Env:\INTERVIEWSCRIBE_EXPECTED_TORCH_BACKEND -ErrorAction SilentlyContinue
 }
 
-$env:HF_HUB_DISABLE_TELEMETRY = "1"
-Install-PinnedMossModel
 if (-not $SkipLocalModels) {
-    Install-PinnedSnapshot -Repository $AsrRepository -Revision $AsrRevision -Destination $AsrDestination
-    Install-PinnedSnapshot -Repository $AlignerRepository -Revision $AlignerRevision -Destination $AlignerDestination
+    Install-PinnedModelScopeSnapshot -Descriptor $AsrDescriptor -Destination $AsrDestination
+    Install-PinnedModelScopeSnapshot -Descriptor $AlignerDescriptor -Destination $AlignerDestination
 }
 else {
-    Write-Host "Skipped local model snapshots. SDK mode is ready; DASHSCOPE_API_KEY is required at run time."
+    Write-Host "Skipped local ModelScope snapshots. Install them before using local high-accuracy transcription."
 }
 
 Write-Host ""
 Write-Host "Qwen runtime installation completed."
 Write-Host "Python: $PythonExe"
 if (-not $SkipLocalModels) {
-    Write-Host "MOSS model: $MossDestination"
     Write-Host "ASR model: $AsrDestination"
     Write-Host "Aligner model: $AlignerDestination"
     Write-Host "Local mode does not need a network connection after installation."
 }
 else {
-    Write-Host "MOSS model: $MossDestination"
-    Write-Host "SDK mode still needs a network connection and DASHSCOPE_API_KEY at run time."
+    Write-Host "Local Qwen model snapshots were intentionally skipped."
 }
 }
 finally {

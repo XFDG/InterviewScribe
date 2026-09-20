@@ -74,13 +74,13 @@ public sealed class RuntimeLocator(AppPaths paths)
     public string FindQwenAsrModelDirectory() => FindQwenModelDirectory(
         "INTERVIEWSCRIBE_QWEN_MODEL_PATH",
         paths.QwenAsrModelRoot,
-        "Qwen3-ASR-1.7B-hf",
+        "Qwen3-ASR-1.7B",
         QwenModelManifest.AsrRevision);
 
     public string FindQwenAlignerModelDirectory() => FindQwenModelDirectory(
         "INTERVIEWSCRIBE_QWEN_ALIGNER_PATH",
         paths.QwenAlignerModelRoot,
-        "Qwen3-ForcedAligner-0.6B-hf",
+        "Qwen3-ForcedAligner-0.6B",
         QwenModelManifest.AlignerRevision);
 
     public string FindTranscribeRuntimeDirectory()

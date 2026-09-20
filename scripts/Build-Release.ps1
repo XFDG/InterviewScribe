@@ -109,8 +109,8 @@ if (-not (Test-Path -LiteralPath $lockFile -PathType Leaf)) {
 $dependencyLock = Get-Content -LiteralPath $lockFile -Raw -Encoding UTF8 | ConvertFrom-Json
 $qwenManifestSource = Get-Content -LiteralPath $qwenManifestFile -Raw -Encoding UTF8
 $qwenSidecarSource = Get-Content -LiteralPath $qwenSidecarFile -Raw -Encoding UTF8
-$lockedAsrRevision = [string]$dependencyLock.models.qwen3Asr17bHf.revision
-$lockedAlignerRevision = [string]$dependencyLock.models.qwen3ForcedAligner06bHf.revision
+$lockedAsrRevision = [string]$dependencyLock.models.qwen3Asr17bModelScope.revision
+$lockedAlignerRevision = [string]$dependencyLock.models.qwen3ForcedAligner06bModelScope.revision
 $manifestAsrRevision = Get-RequiredRegexCapture `
     -Source $qwenManifestSource `
     -Pattern 'internal\s+const\s+string\s+AsrRevision\s*=\s*"([0-9a-f]{40})"' `
@@ -131,7 +131,7 @@ $sidecarAlignerRevision = Get-RequiredRegexCapture `
 $asrRevisionSet = @(@($lockedAsrRevision, $manifestAsrRevision, $sidecarAsrRevision) | Sort-Object -Unique)
 $alignerRevisionSet = @(@($lockedAlignerRevision, $manifestAlignerRevision, $sidecarAlignerRevision) | Sort-Object -Unique)
 if ($asrRevisionSet.Count -ne 1 -or $alignerRevisionSet.Count -ne 1) {
-    throw '依赖锁、C# 运行时与 Python sidecar 中的 Qwen 模型版本不一致。'
+    throw '依赖锁、C# 运行时与 Python sidecar 中的 ModelScope Qwen 模型版本不一致。'
 }
 
 $ffmpegRequiredFiles = @($dependencyLock.nativeDependencies.ffmpeg.requiredFiles)
