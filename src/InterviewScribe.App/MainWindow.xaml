@@ -6,7 +6,7 @@
         Height="790"
         MinWidth="940"
         MinHeight="680"
-        Icon="/Assets/InterviewScribe.ico"
+        Icon="/Assets/interviewscribe-icon.png"
         WindowStartupLocation="CenterScreen"
         AllowDrop="True"
         Loaded="Window_Loaded"
