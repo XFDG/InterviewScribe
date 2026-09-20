@@ -926,10 +926,10 @@ def _normalise_speaker_turns(
 ) -> tuple[list[SpeakerTurn], list[str]]:
     """Turn sparse MOSS segments into non-overlapping, full-duration speaker runs.
 
-    Silence between two different speakers is divided at its midpoint. A small
-    overlap is likewise divided at its midpoint. Large/nested overlaps are
-    ambiguous and rejected: silently choosing one speaker would violate the
-    contract that an uploaded SDK chunk never crosses a known speaker turn.
+    Silence between two different speakers is divided at its midpoint. An
+    overlap is likewise divided at its midpoint and reported as a warning.
+    Fully nested turns remain ambiguous and are rejected: representing them
+    safely would require source separation rather than a linear timeline.
     """
 
     if total_frames <= 0:
@@ -958,13 +958,14 @@ def _normalise_speaker_turns(
                 raise UserFacingError(
                     "说话人时间轴含有不同说话人的嵌套分段，SDK 无法保证单一说话人切片。"
                 )
+            overlap_ms = round(overlap * 1000 / SAMPLE_RATE)
             if overlap > _MAXIMUM_TOLERATED_SPEAKER_OVERLAP_FRAMES:
-                overlap_ms = round(overlap * 1000 / SAMPLE_RATE)
-                raise UserFacingError(
-                    f"说话人时间轴中不同说话人重叠 {overlap_ms} ms，"
-                    "超过可保守分割的 400 ms。"
+                warnings.append(
+                    f"说话人时间轴中不同说话人重叠 {overlap_ms} ms；"
+                    "SDK 模式已在重叠区中点分割，该处说话人建议人工复核。"
                 )
-            warnings.append("说话人时间轴存在轻微重叠，已在重叠区中点分割。")
+            else:
+                warnings.append("说话人时间轴存在轻微重叠，已在重叠区中点分割。")
         sequence.append(turn)
 
     if not sequence:

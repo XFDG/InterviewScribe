@@ -35,12 +35,15 @@ public sealed class PipelineGuardTests
     {
         using var directory = new TemporaryDirectory();
         var temporaryAudioDirectory = Path.Combine(directory.Path, ".qwen-audio-sdk-test");
+        var mossAudioDirectory = Path.Combine(directory.Path, ".moss-audio-chunks");
         var unrelatedDirectory = Path.Combine(directory.Path, "diagnostics");
         Directory.CreateDirectory(temporaryAudioDirectory);
+        Directory.CreateDirectory(mossAudioDirectory);
         Directory.CreateDirectory(unrelatedDirectory);
         File.WriteAllText(Path.Combine(directory.Path, "audio.wav"), "source audio");
         File.WriteAllText(Path.Combine(directory.Path, "audio.wav.tmp"), "partial audio");
         File.WriteAllText(Path.Combine(temporaryAudioDirectory, "segment.wav"), "derived audio");
+        File.WriteAllText(Path.Combine(mossAudioDirectory, "audio-001.wav"), "derived audio");
         File.WriteAllText(Path.Combine(directory.Path, "qwen.stderr.log"), "diagnostic output");
         File.WriteAllText(Path.Combine(unrelatedDirectory, "details.json"), "{}");
 
@@ -49,6 +52,7 @@ public sealed class PipelineGuardTests
         Assert.False(File.Exists(Path.Combine(directory.Path, "audio.wav")));
         Assert.False(File.Exists(Path.Combine(directory.Path, "audio.wav.tmp")));
         Assert.False(Directory.Exists(temporaryAudioDirectory));
+        Assert.False(Directory.Exists(mossAudioDirectory));
         Assert.True(File.Exists(Path.Combine(directory.Path, "qwen.stderr.log")));
         Assert.True(File.Exists(Path.Combine(unrelatedDirectory, "details.json")));
     }

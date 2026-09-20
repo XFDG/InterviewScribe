@@ -99,8 +99,14 @@ internal sealed class PipelineProgressCoordinator
             return null;
         }
 
-        var effectiveElapsedSeconds = Math.Max(0.001, elapsed.TotalSeconds);
-        var rawSeconds = effectiveElapsedSeconds * (1d - overall) / Math.Max(overall, 0.001);
+        // Estimate from work completed since the current phase/retry baseline.
+        // ResetEta moves both baselines, so a failed GPU attempt does not pollute
+        // the CPU retry estimate while elapsed time shown to the user stays global.
+        var effectiveElapsedSeconds = Math.Max(
+            0.001,
+            (elapsed - _phaseStartElapsed).TotalSeconds);
+        var completedSinceBaseline = Math.Max(overall - phaseStart, 0.001);
+        var rawSeconds = effectiveElapsedSeconds * (1d - overall) / completedSinceBaseline;
         if (!double.IsFinite(rawSeconds) || rawSeconds < 0 || rawSeconds > MaximumEta.TotalSeconds)
         {
             return null;

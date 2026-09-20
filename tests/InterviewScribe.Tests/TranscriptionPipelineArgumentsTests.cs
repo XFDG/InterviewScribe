@@ -90,21 +90,40 @@ public sealed class TranscriptionPipelineArgumentsTests
             language);
 
         Assert.Contains("--context-tokens", vulkanArguments);
-        Assert.Contains("65536", vulkanArguments);
+        Assert.Contains("32768", vulkanArguments);
         Assert.DoesNotContain("--context-tokens", cpuArguments);
     }
 
     [Theory]
     [InlineData(1, true)]
-    [InlineData(60, true)]
-    [InlineData(61, false)]
-    public void GetVulkanContextTokenCap_OnlyProtectsRecordingsUpToOneHour(
+    [InlineData(25, true)]
+    [InlineData(26, false)]
+    public void GetVulkanContextTokenCap_OnlyProtectsGpuSizedChunks(
         int minutes,
         bool expectedCap)
     {
         var result = TranscriptionPipeline.GetVulkanContextTokenCap(TimeSpan.FromMinutes(minutes));
 
         Assert.Equal(expectedCap, result.HasValue);
+    }
+
+    [Fact]
+    public void GetEffectiveMediaDuration_UsesLongerExtractedAudioDuration()
+    {
+        var effective = TranscriptionPipeline.GetEffectiveMediaDuration(
+            TimeSpan.FromMinutes(30),
+            TimeSpan.FromMinutes(31));
+
+        Assert.Equal(TimeSpan.FromMinutes(31), effective);
+    }
+
+    [Fact]
+    public void GetEffectiveMediaDuration_RejectsExtractedAudioOverTwoHours()
+    {
+        Assert.Throws<NotSupportedException>(() =>
+            TranscriptionPipeline.GetEffectiveMediaDuration(
+                TimeSpan.FromHours(1),
+                TimeSpan.FromHours(2) + TimeSpan.FromMilliseconds(1)));
     }
 
     [Fact]

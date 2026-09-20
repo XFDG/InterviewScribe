@@ -11,8 +11,8 @@ namespace InterviewScribe.Infrastructure.Pipeline;
 public sealed class TranscriptionPipeline
 {
     private static readonly TimeSpan MaximumMediaDuration = TimeSpan.FromHours(2);
-    private static readonly TimeSpan VulkanProtectedContextMaximumDuration = TimeSpan.FromHours(1);
-    internal const int VulkanProtectedContextTokens = 65_536;
+    private static readonly TimeSpan VulkanProtectedContextMaximumDuration = TimeSpan.FromMinutes(25);
+    internal const int VulkanProtectedContextTokens = 32_768;
     private const string QwenLocalDisplayName = "Qwen3-ASR-1.7B-hf + MOSS 说话人区分";
     private const string QwenSdkDisplayName = "qwen3-asr-flash SDK + MOSS 说话人区分";
 
@@ -171,77 +171,49 @@ public sealed class TranscriptionPipeline
             AddLog(logMessages, "音轨提取完成；原视频未被修改。", diagnostics);
             cancellationToken.ThrowIfCancellationRequested();
 
+            // Container/video duration can be longer than its audio stream. Chunk
+            // the WAV that will actually be transcribed, otherwise a silent video
+            // tail could produce an empty final chunk and fail the entire job.
+            var extractedAudioInfo = await _mediaProcessor.ProbeAsync(
+                ffprobePath,
+                wavPath,
+                jobDirectory,
+                cancellationToken,
+                "ffprobe-extracted-audio.stderr.log").ConfigureAwait(false);
+            var recognitionDuration = extractedAudioInfo.Duration;
+            var documentDuration = GetEffectiveMediaDuration(mediaInfo.Duration, recognitionDuration);
+            var durationDifference = mediaInfo.Duration - recognitionDuration;
+            if (durationDifference > TimeSpan.FromSeconds(2))
+            {
+                AddLog(
+                    logMessages,
+                    $"视频比实际音轨长 {FormatDuration(durationDifference)}；" +
+                    "将按实际音轨时长分段，不会在结尾生成空音频。",
+                    diagnostics);
+            }
+
             progressCoordinator.Report(
                 PipelinePhase.MossDiarization,
                 JobState.ReadyToTranscribe,
                 "正在初始化显卡推理…",
                 0);
 
-            EngineRunOutcome engineRun;
-            try
-            {
-                var vulkanContextTokens = GetVulkanContextTokenCap(mediaInfo.Duration);
-                if (vulkanContextTokens is int contextTokens)
-                {
-                    AddLog(
-                        logMessages,
-                        $"GPU 优先：已为 Vulkan 启用 {contextTokens:N0}-token 显存保护；若无法保证完整输出，将自动用 CPU 完整重试。",
-                        diagnostics);
-                }
-
-                engineRun = await RunEngineAsync(
-                    "vulkan",
-                    languageSelection,
-                    engineHostPath,
-                    transcribeRuntimeDirectory,
-                    modelPath,
-                    wavPath,
-                    mossResultPath,
-                    jobDirectory,
-                    vulkanContextTokens,
-                    progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
-                    diagnostics,
-                    cancellationToken).ConfigureAwait(false);
-                AddLog(logMessages, $"识别后端：Vulkan GPU（耗时 {FormatDuration(engineRun.Elapsed)}）。", diagnostics);
-            }
-            catch (EngineRunException vulkanException) when (!cancellationToken.IsCancellationRequested)
-            {
-                AddLog(logMessages, $"Vulkan 未能完成识别：{vulkanException.CleanMessage}", diagnostics);
-                AddLog(logMessages, "已自动切换到 CPU 后端重试。", diagnostics);
-                progressCoordinator.ResetEta();
-                progressCoordinator.Report(
-                    PipelinePhase.MossDiarization,
-                    JobState.ReadyToTranscribe,
-                    "显卡推理不可用，正在切换到 CPU；剩余时间将重新估算。",
-                    0);
-
-                TryDelete(mossResultPath);
-                TryDelete(mossResultPath + ".tmp");
-                try
-                {
-                    engineRun = await RunEngineAsync(
-                        "cpu",
-                        languageSelection,
-                        engineHostPath,
-                        transcribeRuntimeDirectory,
-                        modelPath,
-                        wavPath,
-                        mossResultPath,
-                        jobDirectory,
-                        null,
-                        progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
-                        diagnostics,
-                        cancellationToken).ConfigureAwait(false);
-                    AddLog(logMessages, $"识别后端：CPU 回退（耗时 {FormatDuration(engineRun.Elapsed)}）。", diagnostics);
-                }
-                catch (EngineRunException cpuException)
-                {
-                    throw new InvalidOperationException(
-                        $"显卡和 CPU 识别都未能完成。CPU 详细信息：{cpuException.CleanMessage} " +
-                        $"诊断文件保存在：{jobDirectory}",
-                        cpuException);
-                }
-            }
+            await RunMossAsync(
+                ffmpegPath,
+                languageSelection,
+                engineHostPath,
+                transcribeRuntimeDirectory,
+                modelPath,
+                wavPath,
+                mossResultPath,
+                sourcePath,
+                recognitionDuration,
+                jobDirectory,
+                progressCoordinator.ForPhase(PipelinePhase.MossDiarization),
+                progressCoordinator.ResetEta,
+                logMessages,
+                diagnostics,
+                cancellationToken).ConfigureAwait(false);
 
             progressCoordinator.Report(
                 PipelinePhase.MossDiarization,
@@ -255,7 +227,7 @@ public sealed class TranscriptionPipeline
                 document = CreateValidatedDocument(
                     mossResult,
                     sourcePath,
-                    mediaInfo.Duration,
+                    documentDuration,
                     ModelStore.MossQ8.DisplayName,
                     ModelStore.MossQ8.Revision);
             }
@@ -266,7 +238,7 @@ public sealed class TranscriptionPipeline
                 _ = CreateValidatedDocument(
                     mossResult,
                     sourcePath,
-                    mediaInfo.Duration,
+                    documentDuration,
                     ModelStore.MossQ8.DisplayName,
                     ModelStore.MossQ8.Revision);
 
@@ -292,7 +264,7 @@ public sealed class TranscriptionPipeline
                 document = CreateValidatedDocument(
                     mergedResult,
                     sourcePath,
-                    mediaInfo.Duration,
+                    documentDuration,
                     modelName,
                     modelRevision);
             }
@@ -355,13 +327,308 @@ public sealed class TranscriptionPipeline
         {
             // Extracted WAV can be large and is always reproducible from the user's
             // untouched source. Keep diagnostic text/JSON after failures, but not
-            // the source WAV or Qwen's derived upload/alignment chunks.
+            // the source WAV or derived MOSS/Qwen audio chunks.
             CleanupJobAudioArtifacts(jobDirectory);
             if (succeeded)
             {
                 TryDeleteDirectory(jobDirectory);
             }
         }
+    }
+
+    private async Task RunMossAsync(
+        string ffmpegPath,
+        LanguageSelection languageSelection,
+        string engineHostPath,
+        string runtimeDirectory,
+        string modelPath,
+        string sourceWavPath,
+        string finalResultPath,
+        string sourcePath,
+        TimeSpan audioDuration,
+        string jobDirectory,
+        IProgress<OperationProgress>? progress,
+        Action resetEta,
+        ICollection<string> logMessages,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
+        var chunks = MossChunkPlanner.Create(audioDuration);
+        var chunkResults = new List<MossChunkEngineResult>(chunks.Count);
+        var temporaryResultPaths = new List<string>();
+        var audioDirectory = Path.Combine(jobDirectory, ".moss-audio-chunks");
+        var totalInferenceTime = TimeSpan.Zero;
+
+        if (chunks.Count > 1)
+        {
+            Directory.CreateDirectory(audioDirectory);
+            AddLog(
+                logMessages,
+                $"长录音将拆成 {chunks.Count} 段（每段不超过 " +
+                $"{MossChunkPlanner.MaximumChunkDuration.TotalMinutes:0} 分钟，边界重叠 " +
+                $"{MossChunkPlanner.BoundaryOverlap.TotalSeconds:0} 秒）；每段优先使用 GPU，仅失败段回退 CPU。",
+                diagnostics);
+        }
+
+        AddLog(
+            logMessages,
+            $"GPU 优先：每个 MOSS 分段将使用 {VulkanProtectedContextTokens:N0}-token 显存保护；" +
+            "若某段无法保证完整输出，只对该段用 CPU 完整重试。",
+            diagnostics);
+
+        try
+        {
+            for (var index = 0; index < chunks.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var chunk = chunks[index];
+                var chunkNumber = index + 1;
+                var runLabel = chunks.Count == 1 ? null : $"chunk-{chunkNumber:000}";
+                var displayPrefix = chunks.Count == 1 ? string.Empty : $"第 {chunkNumber}/{chunks.Count} 段：";
+                var chunkAudioPath = chunks.Count == 1
+                    ? sourceWavPath
+                    : Path.Combine(audioDirectory, $"audio-{chunkNumber:000}.wav");
+                var chunkResultPath = chunks.Count == 1
+                    ? finalResultPath
+                    : Path.Combine(jobDirectory, $"moss-result.chunk-{chunkNumber:000}.json");
+                if (chunks.Count > 1)
+                {
+                    temporaryResultPaths.Add(chunkResultPath);
+                }
+
+                var chunkProgress = new ChunkOperationProgress(
+                    progress,
+                    index,
+                    chunks.Count,
+                    displayPrefix,
+                    chunks.Count == 1 ? 1 : 0.99);
+                try
+                {
+                    if (chunks.Count > 1)
+                    {
+                        chunkProgress.Report(new OperationProgress(
+                            JobState.Transcribing,
+                            "正在准备临时音频…",
+                            0));
+                        await _mediaProcessor.ExtractMonoPcmSegmentAsync(
+                            ffmpegPath,
+                            sourceWavPath,
+                            chunkAudioPath,
+                            TimeSpan.FromMilliseconds(chunk.StartMs),
+                            TimeSpan.FromMilliseconds(chunk.DurationMs),
+                            jobDirectory,
+                            runLabel!,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+
+                    var attempt = await RunMossChunkWithFallbackAsync(
+                        languageSelection,
+                        engineHostPath,
+                        runtimeDirectory,
+                        modelPath,
+                        chunkAudioPath,
+                        chunkResultPath,
+                        jobDirectory,
+                        runLabel,
+                        chunk,
+                        chunks.Count,
+                        chunkProgress,
+                        resetEta,
+                        logMessages,
+                        diagnostics,
+                        cancellationToken).ConfigureAwait(false);
+                    totalInferenceTime += attempt.Outcome.Elapsed;
+                    chunkResults.Add(new MossChunkEngineResult(chunk, attempt.Result));
+                    chunkProgress.Report(new OperationProgress(
+                        JobState.Transcribing,
+                        "识别完成",
+                        1));
+                }
+                finally
+                {
+                    if (chunks.Count > 1)
+                    {
+                        TryDelete(chunkAudioPath);
+                        TryDelete(chunkAudioPath + ".tmp");
+                    }
+                }
+            }
+
+            if (chunks.Count > 1)
+            {
+                progress?.Report(new OperationProgress(
+                    JobState.Transcribing,
+                    "正在合并分段时间轴、边界文字和说话人标签…",
+                    0.995));
+                var merged = MossChunkResultMerger.Merge(
+                    chunkResults,
+                    Path.GetFileName(sourcePath),
+                    audioDuration);
+                await WriteEngineResultAsync(finalResultPath, merged, cancellationToken).ConfigureAwait(false);
+                progress?.Report(new OperationProgress(
+                    JobState.Transcribing,
+                    "分段时间轴和说话人标签已合并。",
+                    1));
+                AddLog(
+                    logMessages,
+                    $"{chunks.Count} 段 MOSS 结果已合并（纯推理耗时 " +
+                    $"{FormatDuration(totalInferenceTime)}）；临时分段已清理，原视频未修改。",
+                    diagnostics);
+            }
+        }
+        finally
+        {
+            foreach (var path in temporaryResultPaths)
+            {
+                TryDelete(path);
+                TryDelete(path + ".tmp");
+            }
+
+            if (chunks.Count > 1)
+            {
+                TryDeleteDirectory(audioDirectory);
+            }
+        }
+    }
+
+    private async Task<MossChunkAttempt> RunMossChunkWithFallbackAsync(
+        LanguageSelection languageSelection,
+        string engineHostPath,
+        string runtimeDirectory,
+        string modelPath,
+        string wavPath,
+        string resultPath,
+        string jobDirectory,
+        string? runLabel,
+        MossChunkPlan chunk,
+        int chunkCount,
+        IProgress<OperationProgress>? progress,
+        Action resetEta,
+        ICollection<string> logMessages,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
+        var label = chunkCount == 1 ? string.Empty : $"第 {chunk.Index + 1}/{chunkCount} 段";
+        try
+        {
+            var attempt = await RunMossAttemptAsync(
+                "vulkan",
+                languageSelection,
+                engineHostPath,
+                runtimeDirectory,
+                modelPath,
+                wavPath,
+                resultPath,
+                jobDirectory,
+                runLabel,
+                GetVulkanContextTokenCap(TimeSpan.FromMilliseconds(chunk.DurationMs)),
+                progress,
+                diagnostics,
+                cancellationToken).ConfigureAwait(false);
+            AddLog(
+                logMessages,
+                $"{label}识别后端：Vulkan GPU（耗时 {FormatDuration(attempt.Outcome.Elapsed)}）。",
+                diagnostics);
+            return attempt;
+        }
+        catch (EngineRunException vulkanException) when (!cancellationToken.IsCancellationRequested)
+        {
+            AddLog(
+                logMessages,
+                $"{label}Vulkan 未能完成识别：{vulkanException.CleanMessage}",
+                diagnostics);
+            AddLog(logMessages, $"{label}已自动切换到 CPU 后端重试。", diagnostics);
+            resetEta();
+            progress?.Report(new OperationProgress(
+                JobState.ReadyToTranscribe,
+                "显卡推理不可用，正在切换到 CPU；剩余时间将重新估算。",
+                0));
+
+            TryDelete(resultPath);
+            TryDelete(resultPath + ".tmp");
+            try
+            {
+                var attempt = await RunMossAttemptAsync(
+                    "cpu",
+                    languageSelection,
+                    engineHostPath,
+                    runtimeDirectory,
+                    modelPath,
+                    wavPath,
+                    resultPath,
+                    jobDirectory,
+                    runLabel,
+                    null,
+                    progress,
+                    diagnostics,
+                    cancellationToken).ConfigureAwait(false);
+                AddLog(
+                    logMessages,
+                    $"{label}识别后端：CPU 回退（耗时 {FormatDuration(attempt.Outcome.Elapsed)}）。",
+                    diagnostics);
+                return attempt;
+            }
+            catch (EngineRunException cpuException)
+            {
+                throw new InvalidOperationException(
+                    $"{label}显卡和 CPU 识别都未能完成。CPU 详细信息：{cpuException.CleanMessage} " +
+                    $"诊断文件保存在：{jobDirectory}",
+                    cpuException);
+            }
+        }
+    }
+
+    private async Task<MossChunkAttempt> RunMossAttemptAsync(
+        string backend,
+        LanguageSelection languageSelection,
+        string engineHostPath,
+        string runtimeDirectory,
+        string modelPath,
+        string wavPath,
+        string resultPath,
+        string jobDirectory,
+        string? runLabel,
+        int? contextTokens,
+        IProgress<OperationProgress>? progress,
+        IProgress<string>? diagnostics,
+        CancellationToken cancellationToken)
+    {
+        var outcome = await RunEngineAsync(
+            backend,
+            languageSelection,
+            engineHostPath,
+            runtimeDirectory,
+            modelPath,
+            wavPath,
+            resultPath,
+            jobDirectory,
+            runLabel,
+            contextTokens,
+            progress,
+            diagnostics,
+            cancellationToken).ConfigureAwait(false);
+
+        EngineResultDto result;
+        try
+        {
+            result = await ReadEngineResultAsync(resultPath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or IOException)
+        {
+            throw new EngineRunException($"识别结果无法读取：{exception.Message}", 0);
+        }
+
+        if (result.IsPartial)
+        {
+            throw new EngineRunException("模型报告结果被截断，不能当作完整输出。", 0);
+        }
+
+        if (result.Segments is null)
+        {
+            throw new EngineRunException("识别引擎没有返回 segments 字段。", 0);
+        }
+
+        return new MossChunkAttempt(outcome, result);
     }
 
     private async Task<EngineRunOutcome> RunEngineAsync(
@@ -373,6 +640,7 @@ public sealed class TranscriptionPipeline
         string wavPath,
         string resultPath,
         string jobDirectory,
+        string? runLabel,
         int? contextTokens,
         IProgress<OperationProgress>? progress,
         IProgress<string>? diagnostics,
@@ -385,6 +653,10 @@ public sealed class TranscriptionPipeline
                 : "正在使用 CPU 识别，速度会慢一些…"));
 
         var logPrefix = backend == "vulkan" ? "engine-vulkan" : "engine-cpu";
+        if (!string.IsNullOrWhiteSpace(runLabel))
+        {
+            logPrefix += $"-{runLabel}";
+        }
         string? lastProgressMessage = null;
         double? lastProgressFraction = null;
         var result = await _processRunner.RunAsync(
@@ -408,7 +680,10 @@ public sealed class TranscriptionPipeline
                 var engineEvent = TryParseEngineEvent(line);
                 if (engineEvent is { Type: "native" } && !string.IsNullOrWhiteSpace(engineEvent.Message))
                 {
-                    diagnostics?.Report($"MOSS 原生运行库：{engineEvent.Message.Trim()}");
+                    var diagnosticLabel = string.IsNullOrWhiteSpace(runLabel)
+                        ? string.Empty
+                        : $"{runLabel} ";
+                    diagnostics?.Report($"MOSS {diagnosticLabel}原生运行库：{engineEvent.Message.Trim()}");
                     return;
                 }
 
@@ -734,6 +1009,30 @@ public sealed class TranscriptionPipeline
             ? VulkanProtectedContextTokens
             : null;
 
+    internal static TimeSpan GetEffectiveMediaDuration(
+        TimeSpan probedMediaDuration,
+        TimeSpan extractedAudioDuration)
+    {
+        if (probedMediaDuration <= TimeSpan.Zero || extractedAudioDuration <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(extractedAudioDuration),
+                "媒体和提取音轨时长必须大于 0。");
+        }
+
+        var effectiveDuration = probedMediaDuration >= extractedAudioDuration
+            ? probedMediaDuration
+            : extractedAudioDuration;
+        if (effectiveDuration > MaximumMediaDuration)
+        {
+            throw new NotSupportedException(
+                $"当前版本一次支持最长 {MaximumMediaDuration.TotalHours:0} 小时的录屏。" +
+                $"实际可识别音轨与媒体的最长时长为 {FormatDuration(effectiveDuration)}。");
+        }
+
+        return effectiveDuration;
+    }
+
     private static async Task<EngineResultDto> ReadEngineResultAsync(
         string resultPath,
         CancellationToken cancellationToken)
@@ -756,6 +1055,40 @@ public sealed class TranscriptionPipeline
         catch (JsonException exception)
         {
             throw new InvalidDataException("识别结果 JSON 损坏或版本不兼容。", exception);
+        }
+    }
+
+    private static async Task WriteEngineResultAsync(
+        string resultPath,
+        EngineResultDto result,
+        CancellationToken cancellationToken)
+    {
+        var temporaryPath = resultPath + ".tmp";
+        TryDelete(temporaryPath);
+        try
+        {
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             64 * 1024,
+                             FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await JsonSerializer.SerializeAsync(
+                    stream,
+                    result,
+                    JsonOptions,
+                    cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, resultPath, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(temporaryPath);
         }
     }
 
@@ -922,12 +1255,15 @@ public sealed class TranscriptionPipeline
 
         try
         {
-            foreach (var directory in Directory.EnumerateDirectories(
-                         jobDirectory,
-                         ".qwen-audio-*",
-                         SearchOption.TopDirectoryOnly))
+            foreach (var pattern in new[] { ".qwen-audio-*", ".moss-audio-*" })
             {
-                TryDeleteDirectory(directory);
+                foreach (var directory in Directory.EnumerateDirectories(
+                             jobDirectory,
+                             pattern,
+                             SearchOption.TopDirectoryOnly))
+                {
+                    TryDeleteDirectory(directory);
+                }
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -1031,6 +1367,7 @@ public sealed class TranscriptionPipeline
 
     private sealed record EngineEvent(string Type, string Message, double? Fraction, int? NativeStatus);
     private sealed record EngineRunOutcome(TimeSpan Elapsed);
+    private sealed record MossChunkAttempt(EngineRunOutcome Outcome, EngineResultDto Result);
     private sealed record QwenRuntime(
         string PythonPath,
         string SidecarPath,
@@ -1042,5 +1379,27 @@ public sealed class TranscriptionPipeline
     {
         public int ExitCode { get; } = exitCode;
         public string CleanMessage { get; } = message;
+    }
+
+    private sealed class ChunkOperationProgress(
+        IProgress<OperationProgress>? target,
+        int chunkIndex,
+        int chunkCount,
+        string messagePrefix,
+        double completionFraction) : IProgress<OperationProgress>
+    {
+        public void Report(OperationProgress value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            var localFraction = value.Fraction is double fraction && double.IsFinite(fraction)
+                ? Math.Clamp(fraction, 0, 1)
+                : 0;
+            var overallFraction = ((chunkIndex + localFraction) / chunkCount) * completionFraction;
+            target?.Report(value with
+            {
+                Message = messagePrefix + value.Message,
+                Fraction = overallFraction,
+            });
+        }
     }
 }

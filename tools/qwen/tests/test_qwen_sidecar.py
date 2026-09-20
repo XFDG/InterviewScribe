@@ -254,15 +254,18 @@ class SpeakerTimelineTests(unittest.TestCase):
             [(item.start_frame, item.end_frame, item.speaker_id) for item in chunks],
         )
 
-    def test_large_different_speaker_overlap_is_rejected(self) -> None:
-        with self.assertRaisesRegex(sidecar.UserFacingError, "400 ms"):
-            sidecar._normalise_speaker_turns(
-                [
-                    sidecar.SpeakerTurn(0, sidecar.SAMPLE_RATE, 1),
-                    sidecar.SpeakerTurn(sidecar.SAMPLE_RATE // 2, 2 * sidecar.SAMPLE_RATE, 2),
-                ],
-                2 * sidecar.SAMPLE_RATE,
-            )
+    def test_large_different_speaker_overlap_is_split_with_warning(self) -> None:
+        runs, warnings = sidecar._normalise_speaker_turns(
+            [
+                sidecar.SpeakerTurn(0, sidecar.SAMPLE_RATE, 1),
+                sidecar.SpeakerTurn(sidecar.SAMPLE_RATE // 2, 2 * sidecar.SAMPLE_RATE, 2),
+            ],
+            2 * sidecar.SAMPLE_RATE,
+        )
+
+        self.assertEqual([1, 2], [run.speaker_id for run in runs])
+        self.assertEqual(runs[0].end_frame, runs[1].start_frame)
+        self.assertTrue(any("500 ms" in warning and "人工复核" in warning for warning in warnings))
 
 
 class ProtocolTests(unittest.TestCase):

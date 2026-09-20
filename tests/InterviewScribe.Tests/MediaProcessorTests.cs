@@ -35,4 +35,45 @@ public sealed class MediaProcessorTests
         Assert.Throws<ArgumentOutOfRangeException>(
             () => MediaProcessor.BuildExtractionArguments("input.mp4", "output.wav", 0));
     }
+
+    [Fact]
+    public void BuildSegmentExtractionArguments_UsesBoundedPrecisePcmWindow()
+    {
+        var arguments = MediaProcessor.BuildSegmentExtractionArguments(
+            "whole.wav",
+            "chunk.wav",
+            TimeSpan.FromMinutes(24.5),
+            TimeSpan.FromMinutes(25));
+
+        Assert.Equal(
+            [
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-ss", "1470",
+                "-i", "whole.wav",
+                "-t", "1500",
+                "-map", "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-ac", "1",
+                "-ar", "16000",
+                "-c:a", "pcm_s16le",
+                "chunk.wav",
+            ],
+            arguments);
+    }
+
+    [Fact]
+    public void BuildSegmentExtractionArguments_RejectsWindowOverGpuLimit()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            MediaProcessor.BuildSegmentExtractionArguments(
+                "whole.wav",
+                "chunk.wav",
+                TimeSpan.Zero,
+                TimeSpan.FromMinutes(25) + TimeSpan.FromMilliseconds(1)));
+    }
 }

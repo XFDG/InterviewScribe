@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using InterviewScribe.Core.Domain;
+using InterviewScribe.Infrastructure.Pipeline;
 using InterviewScribe.Infrastructure.Processes;
 
 namespace InterviewScribe.Infrastructure.Media;
@@ -12,7 +13,8 @@ public sealed class MediaProcessor(ManagedProcessRunner processRunner)
         string ffprobePath,
         string sourcePath,
         string logDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string standardErrorLogFileName = "ffprobe.stderr.log")
     {
         var result = await processRunner.RunAsync(
             new ProcessSpec
@@ -26,7 +28,7 @@ public sealed class MediaProcessor(ManagedProcessRunner processRunner)
                     "-of", "json",
                     sourcePath,
                 ],
-                StandardErrorLogPath = Path.Combine(logDirectory, "ffprobe.stderr.log"),
+                StandardErrorLogPath = Path.Combine(logDirectory, standardErrorLogFileName),
             },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -174,6 +176,42 @@ public sealed class MediaProcessor(ManagedProcessRunner processRunner)
         }
     }
 
+    public async Task ExtractMonoPcmSegmentAsync(
+        string ffmpegPath,
+        string sourceWavPath,
+        string destinationPath,
+        TimeSpan start,
+        TimeSpan duration,
+        string logDirectory,
+        string logSuffix,
+        CancellationToken cancellationToken)
+    {
+        var result = await processRunner.RunAsync(
+            new ProcessSpec
+            {
+                FileName = ffmpegPath,
+                Arguments = BuildSegmentExtractionArguments(
+                    sourceWavPath,
+                    destinationPath,
+                    start,
+                    duration),
+                StandardOutputLogPath = Path.Combine(logDirectory, $"ffmpeg-{logSuffix}.stdout.log"),
+                StandardErrorLogPath = Path.Combine(logDirectory, $"ffmpeg-{logSuffix}.stderr.log"),
+            },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidDataException(
+                $"提取第 {logSuffix} 段临时音频失败。{FormatProcessError(result.StandardErrorTail)}");
+        }
+
+        if (!File.Exists(destinationPath) || new FileInfo(destinationPath).Length <= 44)
+        {
+            throw new InvalidDataException($"第 {logSuffix} 段临时音频为空。");
+        }
+    }
+
     internal static IReadOnlyList<string> BuildExtractionArguments(
         string sourcePath,
         string destinationPath,
@@ -225,6 +263,47 @@ public sealed class MediaProcessor(ManagedProcessRunner processRunner)
         ]);
         return arguments;
     }
+
+    internal static IReadOnlyList<string> BuildSegmentExtractionArguments(
+        string sourceWavPath,
+        string destinationPath,
+        TimeSpan start,
+        TimeSpan duration)
+    {
+        if (start < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(start));
+        }
+
+        if (duration <= TimeSpan.Zero || duration > MossChunkPlanner.MaximumChunkDuration)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(duration),
+                $"分段时长必须大于 0 且不超过 {MossChunkPlanner.MaximumChunkDuration.TotalMinutes:0} 分钟。");
+        }
+
+        return
+        [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-ss", FormatFfmpegSeconds(start),
+            "-i", sourceWavPath,
+            "-t", FormatFfmpegSeconds(duration),
+            "-map", "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "pcm_s16le",
+            destinationPath,
+        ];
+    }
+
+    private static string FormatFfmpegSeconds(TimeSpan value) =>
+        value.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture);
 
     private static void ReportFfmpegProgress(
         string line,

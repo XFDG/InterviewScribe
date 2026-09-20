@@ -228,7 +228,7 @@ internal sealed record Arguments(
         {
             throw new EngineException(
                 "用法：InterviewScribe.EngineHost --runtime <dir> --model <gguf> --audio <wav> --output <json> " +
-                "[--backend auto|cuda|vulkan|cpu] [--language auto|zh|en] [--context-tokens 65536]");
+                "[--backend auto|cuda|vulkan|cpu] [--language auto|zh|en] [--context-tokens 32768]");
         }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
