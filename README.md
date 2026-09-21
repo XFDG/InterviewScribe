@@ -30,6 +30,8 @@ MediaScribe 是一个面向 Windows 10/11 x64 的本地媒体转写 GUI。把已
 4. Qwen 模式会先释放 ASR 与 CUDA 缓存，再加载 ForcedAligner，避免两套大模型同时占用显存。
 5. 所有选中的格式先写入临时文件，全部成功后原子提交；取消或失败不会留下半成品。可重建的 WAV、分段音频和中间 JSON 会清理，原始媒体始终保留。
 
+Qwen3-ForcedAligner 的上游时间轴是 80 ms 网格；密集的中英 token 偶尔会落在同一个时间点。MediaScribe 会保留文字和原生时间点、按邻近说话人归属，并在导出警告中如实提示该处的时间轴精度，而不会因此让整段录音失败。倒序、非数字或明显越界的时间戳仍会作为真实错误拦截。
+
 单个媒体文件目前上限为 8 小时。使用 MOSS 的录音会先按显卡上下文推导安全窗口（并受 25 分钟原生硬上限约束），相邻窗口重叠 30 秒，再合并全局时间轴和说话人标签。若某个 GPU 段仍报告上下文不足，程序会继续缩短该计划并重试 Vulkan，而不是把整段录音改用慢速 CPU；只有非长度类 GPU 运行故障才会回退 CPU。其他模式也会按显存配置把 Qwen 音频切为保守的小段。
 
 ## 显卡自适应，而非只为 RTX 5060 编写
@@ -140,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\qwen\Install-QwenRun
 
 ```powershell
 winget install --id JRSoftware.InnoSetup -e
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.1
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.2
 ```
 
 发布脚本会校验原生依赖与模型描述、运行 C# 和两套 Python sidecar 测试、生成 `win-x64` 自包含 GUI、拷贝 Qwen 与 Whisper 安装脚本，并输出：
@@ -153,7 +155,7 @@ artifacts\release\SHA256SUMS.txt
 只生成可便携目录、跳过 Inno Setup：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.1 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 0.5.2 -SkipInstaller
 ```
 
 ## 开源与许可证

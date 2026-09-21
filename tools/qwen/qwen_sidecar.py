@@ -23,6 +23,10 @@ from typing import Any, Iterable, Sequence
 SAMPLE_RATE = 16_000
 SAMPLE_WIDTH = 2
 CHANNELS = 1
+# The official Qwen3 ForcedAligner decoder quantizes its token positions to
+# this grid.  A final token can therefore land one grid step beyond a chunk
+# whose VAD-derived boundary is not itself grid-aligned.
+ALIGNMENT_TIMESTAMP_GRID_MS = 80
 ASR_REPOSITORY = "Qwen/Qwen3-ASR-1.7B"
 ASR_REVISION = "d69410f1c275f2b0fa60cbb9960edfcdb0ae0aec"
 ALIGNER_REPOSITORY = "Qwen/Qwen3-ForcedAligner-0.6B"
@@ -499,23 +503,37 @@ def _aligned_word_segments(
             ) from exc
         if not math.isfinite(word_start) or not math.isfinite(word_end):
             raise UserFacingError(f"对齐器第 {index + 1} 个词/token 的时间戳不是有限数。")
-        if word_start < 0 or word_end <= word_start:
+        # Qwen3-ForcedAligner emits timestamps on an 80 ms grid.  Its public
+        # decoder deliberately makes the grid indices non-decreasing, rather
+        # than strictly increasing, so a real token can legitimately have a
+        # zero-width [t, t] interval.  Keep that native point timestamp: the
+        # .NET speaker merger explicitly resolves it against the nearest
+        # speaker turn.  Only a backwards interval is corrupt.
+        if word_start < 0 or word_end < word_start:
             raise UserFacingError(f"对齐器第 {index + 1} 个词/token 的时间范围无效。")
 
         start_offset_ms = round(word_start * 1000)
         end_offset_ms = round(word_end * 1000)
+        if start_offset_ms < 0 or end_offset_ms < start_offset_ms:
+            raise UserFacingError(
+                f"对齐器第 {index + 1} 个词/token 的时间戳 "
+                f"{start_offset_ms}–{end_offset_ms} ms 超出当前音频分段 "
+                f"0–{chunk_duration_ms} ms。"
+            )
+        # The duration of an audio chunk may end between two 80 ms timestamp
+        # bins.  Allow one native grid step of harmless tail overshoot, then
+        # clamp it to the real audio boundary.  Larger overshoot remains a
+        # genuine malformed result and must not be made up by the app.
         if (
-            start_offset_ms < 0
-            or start_offset_ms >= chunk_duration_ms
-            or end_offset_ms <= start_offset_ms
-            or end_offset_ms > chunk_duration_ms + 2
+            start_offset_ms > chunk_duration_ms + ALIGNMENT_TIMESTAMP_GRID_MS
+            or end_offset_ms > chunk_duration_ms + ALIGNMENT_TIMESTAMP_GRID_MS
         ):
             raise UserFacingError(
                 f"对齐器第 {index + 1} 个词/token 的时间戳 "
                 f"{start_offset_ms}–{end_offset_ms} ms 超出当前音频分段 "
                 f"0–{chunk_duration_ms} ms。"
             )
-        start_ms = chunk_start_ms + start_offset_ms
+        start_ms = chunk_start_ms + min(chunk_duration_ms, start_offset_ms)
         end_ms = chunk_start_ms + min(chunk_duration_ms, end_offset_ms)
         segments.append(
             {
@@ -541,6 +559,8 @@ def _align_local_chunks(
     model: Any = None
     segments: list[dict[str, Any]] = []
     warnings: list[str] = []
+    zero_width_token_count = 0
+    zero_width_chunk_count = 0
     alignment_plan = [
         (index, item, _alignment_language(item.language, requested_language))
         for index, item in enumerate(transcripts)
@@ -633,6 +653,12 @@ def _align_local_chunks(
                 if not aligned_words:
                     raise ValueError("对齐器未返回有效时间戳")
                 segments.extend(aligned_words)
+                zero_width_count = sum(
+                    segment["startMs"] == segment["endMs"] for segment in aligned_words
+                )
+                if zero_width_count:
+                    zero_width_token_count += zero_width_count
+                    zero_width_chunk_count += 1
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as exc:
@@ -643,10 +669,18 @@ def _align_local_chunks(
                 raise UserFacingError(
                     f"第 {index + 1}/{len(transcripts)} 段强制对齐失败"
                     f"（{item.audio.start_ms}–{item.audio.end_ms} ms）：{detail}。"
-                    "未生成粗粒度回退时间轴，请检查显存/内存或重新安装对齐模型。"
+                    "未生成粗粒度回退时间轴；请查看运行记录中的对齐器错误。"
                 ) from exc
             fraction = 0.66 + 0.29 * ((aligned_index + 1) / len(alignment_plan))
             _progress(f"时间轴对齐 {aligned_index + 1}/{len(alignment_plan)}", fraction)
+        if zero_width_token_count:
+            warnings.append(
+                "Qwen3-ForcedAligner 在 "
+                f"{zero_width_chunk_count} 个音频分段中返回了 {zero_width_token_count} 个"
+                f"零时长词级时间点（{ALIGNMENT_TIMESTAMP_GRID_MS} ms 网格量化）；"
+                "已保留原文和模型原生时间点，这些词将按邻近说话人归属，"
+                "对应位置的时间轴精度略低。"
+            )
         return segments, warnings
     finally:
         del model

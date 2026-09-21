@@ -157,6 +157,55 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(["hello", ", world!"], [segment["text"] for segment in segments])
         self.assertEqual((1_100, 1_400), (segments[0]["startMs"], segments[0]["endMs"]))
 
+    def test_zero_width_forced_aligner_token_is_preserved_with_a_warning(self) -> None:
+        class FakeAligner:
+            @classmethod
+            def from_pretrained(cls, *_args: object, **_kwargs: object) -> "FakeAligner":
+                return cls()
+
+            def align(self, **_kwargs: object) -> list[object]:
+                return [
+                    types.SimpleNamespace(
+                        items=[
+                            types.SimpleNamespace(text="hello", start_time=0.1, end_time=0.4),
+                            # This is a normal artifact of Qwen3-ForcedAligner's
+                            # non-decreasing 80 ms timestamp grid.
+                            types.SimpleNamespace(text="world", start_time=0.4, end_time=0.4),
+                        ]
+                    )
+                ]
+
+        fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
+        fake_qwen_asr = types.ModuleType("qwen_asr")
+        fake_qwen_asr.Qwen3ForcedAligner = FakeAligner
+        transcript = sidecar.TranscriptChunk(
+            sidecar.AudioChunk(Path("chunk.wav"), sidecar.SAMPLE_RATE, 3 * sidecar.SAMPLE_RATE),
+            "hello world",
+            "hello world",
+            "English",
+        )
+
+        with mock.patch.dict(sys.modules, {"qwen_asr": fake_qwen_asr}):
+            segments, warnings = sidecar._align_local_chunks(
+                [transcript], Path("aligner"), "cpu", object(), "en", fake_torch
+            )
+
+        self.assertEqual(["hello", " world"], [segment["text"] for segment in segments])
+        self.assertEqual((1_400, 1_400), (segments[1]["startMs"], segments[1]["endMs"]))
+        self.assertTrue(any("零时长词级时间点" in warning for warning in warnings))
+
+    def test_zero_width_timestamp_at_chunk_boundary_is_preserved(self) -> None:
+        segments = sidecar._aligned_word_segments(
+            [{"text": "last", "start_time": 5.0, "end_time": 5.0}], 5_000, 10_000
+        )
+        self.assertEqual((10_000, 10_000), (segments[0]["startMs"], segments[0]["endMs"]))
+
+    def test_grid_aligned_tail_overshoot_is_clamped_to_the_audio_boundary(self) -> None:
+        segments = sidecar._aligned_word_segments(
+            [{"text": "last", "start_time": 5.04, "end_time": 5.12}], 5_000, 10_050
+        )
+        self.assertEqual((10_040, 10_050), (segments[0]["startMs"], segments[0]["endMs"]))
+
     def test_unsupported_auto_detected_language_is_coarse_not_false_chinese_alignment(self) -> None:
         class FakeAligner:
             @classmethod
