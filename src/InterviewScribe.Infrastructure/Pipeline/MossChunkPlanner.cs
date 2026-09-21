@@ -14,11 +14,14 @@ internal static class MossChunkPlanner
     internal static readonly TimeSpan BoundaryOverlap = TimeSpan.FromSeconds(30);
 
     // The native runtime expands audio into prompt tokens before generation.
-    // The observed rate is about 13.2 tokens/sec.  Use a deliberately higher
-    // rate plus a 1k-token reserve so a GPU segment does not get close enough
-    // to its context limit to trigger an otherwise very slow CPU retry.
+    // The observed rate is about 13.2 tokens/sec.  Its context window is also
+    // shared with generated text and speaker tags: a dense conversational
+    // segment can need several thousand output tokens after its prompt has
+    // been prefetched.  Reserve 4k tokens up front rather than planning a
+    // segment which inevitably hits the native output/context cap and then
+    // falls back to CPU.
     private const double ConservativePromptTokensPerSecond = 15d;
-    private const int GenerationAndSafetyReserveTokens = 1_024;
+    private const int GenerationAndSafetyReserveTokens = 4_096;
 
     internal static TimeSpan GetGpuSafeMaximumChunkDuration(int contextTokens)
     {

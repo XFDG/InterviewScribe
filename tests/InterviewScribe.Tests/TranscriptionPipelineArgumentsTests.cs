@@ -95,8 +95,10 @@ public sealed class TranscriptionPipelineArgumentsTests
 
     [Theory]
     [InlineData(1, true)]
-    [InlineData(17, true)]
-    [InlineData(18, false)]
+    // A 16,384-token GPU profile reserves 4,096 tokens for dense generated
+    // speech/speaker labels, so its protected Vulkan window is 13:39.
+    [InlineData(13, true)]
+    [InlineData(14, false)]
     public void GetVulkanContextTokenCap_OnlyProtectsGpuSizedChunks(
         int minutes,
         bool expectedCap)
@@ -104,6 +106,21 @@ public sealed class TranscriptionPipelineArgumentsTests
         var result = TranscriptionPipeline.GetVulkanContextTokenCap(TimeSpan.FromMinutes(minutes));
 
         Assert.Equal(expectedCap, result.HasValue);
+    }
+
+    [Fact]
+    public void ExtractEngineFailure_PreservesNativeOutputTruncatedStatus()
+    {
+        const string stderr =
+            "{\"type\":\"native\",\"message\":\"moss run: output truncated at 3674 tokens\"}\n" +
+            "{\"type\":\"error\",\"message\":\"语音识别失败：output truncated: decode hit the context/generation cap before end-of-stream\",\"nativeStatus\":18}";
+
+        var failure = TranscriptionPipeline.ExtractEngineFailure(stderr);
+
+        Assert.Equal(
+            "语音识别失败：output truncated: decode hit the context/generation cap before end-of-stream",
+            failure.Message);
+        Assert.Equal(18, failure.NativeStatus);
     }
 
     [Fact]

@@ -22,11 +22,48 @@ public sealed class MossChunkingTests
 
         var chunks = MossChunkPlanner.Create(duration, gpuSafeMaximum);
 
-        Assert.Equal(TimeSpan.FromSeconds(1_024), gpuSafeMaximum);
+        Assert.Equal(TimeSpan.FromSeconds(819), gpuSafeMaximum);
         Assert.Equal(2, chunks.Count);
         Assert.Equal(0, chunks[0].StartMs);
         Assert.Equal((long)duration.TotalMilliseconds, chunks[^1].EndMs);
         Assert.All(chunks, chunk => Assert.True(chunk.DurationMs <= gpuSafeMaximum.TotalMilliseconds));
+    }
+
+    [Fact]
+    public void Planner_ReservesGenerationTokens_ForDenseThirtyOneMinuteConversation()
+    {
+        var gpuSafeMaximum = MossChunkPlanner.GetGpuSafeMaximumChunkDuration(16_384);
+        var chunks = MossChunkPlanner.Create(TimeSpan.FromMinutes(31) + TimeSpan.FromSeconds(40), gpuSafeMaximum);
+
+        Assert.Equal(TimeSpan.FromSeconds(819), gpuSafeMaximum);
+        Assert.Equal(3, chunks.Count);
+        Assert.All(chunks, chunk => Assert.True(chunk.DurationMs <= gpuSafeMaximum.TotalMilliseconds));
+        Assert.All(chunks, chunk => Assert.True(chunk.DurationMs < TimeSpan.FromMinutes(11).TotalMilliseconds));
+    }
+
+    [Theory]
+    [InlineData("output truncated: decode hit the context/generation cap before end-of-stream")]
+    [InlineData("input audio too long for model context")]
+    [InlineData("模型报告结果被截断，不能当作完整输出")]
+    public void FailureClassifier_OutputOrContextCap_RequestsShorterGpuChunk(string message)
+    {
+        Assert.True(MossGpuFailureClassifier.RequiresShorterGpuChunk(message));
+    }
+
+    [Theory]
+    [InlineData(17)]
+    [InlineData(18)]
+    public void FailureClassifier_NativeInputOrOutputCap_RequestsShorterGpuChunk(int nativeStatus)
+    {
+        Assert.True(MossGpuFailureClassifier.RequiresShorterGpuChunk(
+            "本地运行库未提供可读错误文本",
+            nativeStatus));
+    }
+
+    [Fact]
+    public void FailureClassifier_DriverFailure_DoesNotPretendItIsATokenLimit()
+    {
+        Assert.False(MossGpuFailureClassifier.RequiresShorterGpuChunk("Vulkan device lost"));
     }
 
     [Fact]

@@ -477,7 +477,7 @@ public sealed class TranscriptionPipeline
                 TryDelete(finalResultPath + ".tmp");
                 AddLog(
                     logMessages,
-                    $"MOSS GPU 分段仍触及上下文：{exception.Message} 已将最长分段从 " +
+                    $"MOSS GPU 分段触及上下文或生成 token 上限：{exception.Message} 已将最长分段从 " +
                     $"{FormatDuration(maximumChunkDuration)} 缩短为 {FormatDuration(reducedMaximum)}，" +
                     "继续使用 Vulkan GPU，不会整段改用 CPU。",
                     diagnostics);
@@ -539,7 +539,7 @@ public sealed class TranscriptionPipeline
         AddLog(
             logMessages,
             $"GPU 优先：{gpuProfile.AdapterName} 将使用 {gpuProfile.MossContextTokens:N0}-token 保守显存窗口；" +
-            $"根据该窗口，单段最长 {FormatDuration(maximumChunkDuration)}。上下文长度不足时会先自动缩短分段并继续使用 GPU。",
+            $"根据该窗口，单段最长 {FormatDuration(maximumChunkDuration)}。上下文或生成 token 达到上限时会先自动缩短分段并继续使用 GPU。",
             diagnostics);
 
         try
@@ -703,13 +703,15 @@ public sealed class TranscriptionPipeline
         }
         catch (EngineRunException vulkanException) when (
             !cancellationToken.IsCancellationRequested &&
-            IsMossGpuChunkSizeFailure(vulkanException))
+            MossGpuFailureClassifier.RequiresShorterGpuChunk(
+                vulkanException.CleanMessage,
+                vulkanException.NativeStatus))
         {
             TryDelete(resultPath);
             TryDelete(resultPath + ".tmp");
             AddLog(
                 logMessages,
-                $"{label}Vulkan GPU 段超过当前上下文，准备缩短分段后继续使用 GPU：" +
+                $"{label}Vulkan GPU 段达到上下文或生成 token 上限，准备缩短分段后继续使用 GPU：" +
                 vulkanException.CleanMessage,
                 diagnostics);
             throw new MossGpuChunkSizeException(vulkanException.CleanMessage, vulkanException);
@@ -803,7 +805,10 @@ public sealed class TranscriptionPipeline
 
         if (result.IsPartial)
         {
-            throw new EngineRunException("模型报告结果被截断，不能当作完整输出（通常是上下文长度不足）。", 0);
+            throw new EngineRunException(
+                "模型报告结果被截断，不能当作完整输出（通常是上下文或生成 token 上限）。",
+                0,
+                18);
         }
 
         if (result.Segments is null)
@@ -892,7 +897,8 @@ public sealed class TranscriptionPipeline
 
         if (result.ExitCode != 0)
         {
-            throw new EngineRunException(ExtractEngineError(result.StandardErrorTail), result.ExitCode);
+            var failure = ExtractEngineFailure(result.StandardErrorTail);
+            throw new EngineRunException(failure.Message, result.ExitCode, failure.NativeStatus);
         }
 
         if (!File.Exists(resultPath) || new FileInfo(resultPath).Length == 0)
@@ -1340,19 +1346,6 @@ public sealed class TranscriptionPipeline
             reducedSeconds));
     }
 
-    private static bool IsMossGpuChunkSizeFailure(EngineRunException exception)
-    {
-        ArgumentNullException.ThrowIfNull(exception);
-        var message = exception.CleanMessage;
-        return message.Contains("input audio too long", StringComparison.OrdinalIgnoreCase) ||
-            (message.Contains("prompt", StringComparison.OrdinalIgnoreCase) &&
-             message.Contains("context", StringComparison.OrdinalIgnoreCase) &&
-             message.Contains("exceed", StringComparison.OrdinalIgnoreCase)) ||
-            (message.Contains("context", StringComparison.OrdinalIgnoreCase) &&
-             message.Contains("too long", StringComparison.OrdinalIgnoreCase)) ||
-            message.Contains("模型报告结果被截断", StringComparison.Ordinal);
-    }
-
     internal static TimeSpan GetEffectiveMediaDuration(
         TimeSpan probedMediaDuration,
         TimeSpan extractedAudioDuration)
@@ -1535,7 +1528,9 @@ public sealed class TranscriptionPipeline
         }
     }
 
-    private static string ExtractEngineError(string stderr)
+    private static string ExtractEngineError(string stderr) => ExtractEngineFailure(stderr).Message;
+
+    internal static (string Message, int? NativeStatus) ExtractEngineFailure(string stderr)
     {
         var lines = stderr.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         for (var index = lines.Length - 1; index >= 0; index--)
@@ -1543,17 +1538,17 @@ public sealed class TranscriptionPipeline
             var engineEvent = TryParseEngineEvent(lines[index]);
             if (engineEvent is { Type: "error" } && !string.IsNullOrWhiteSpace(engineEvent.Message))
             {
-                return engineEvent.Message.Trim();
+                return (engineEvent.Message.Trim(), engineEvent.NativeStatus);
             }
         }
 
         var fallback = lines.LastOrDefault();
         if (string.IsNullOrWhiteSpace(fallback))
         {
-            return "识别进程异常退出，未返回详细原因。";
+            return ("识别进程异常退出，未返回详细原因。", null);
         }
 
-        return fallback.Length <= 800 ? fallback : fallback[^800..];
+        return (fallback.Length <= 800 ? fallback : fallback[^800..], null);
     }
 
     private void CleanupOldJobs()
@@ -1722,9 +1717,10 @@ public sealed class TranscriptionPipeline
         string SidecarPath,
         string ModelDirectory);
 
-    private sealed class EngineRunException(string message, int exitCode) : Exception(message)
+    private sealed class EngineRunException(string message, int exitCode, int? nativeStatus = null) : Exception(message)
     {
         public int ExitCode { get; } = exitCode;
+        public int? NativeStatus { get; } = nativeStatus;
         public string CleanMessage { get; } = message;
     }
 
